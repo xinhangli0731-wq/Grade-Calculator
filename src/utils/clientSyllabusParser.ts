@@ -362,9 +362,14 @@ export async function parseSyllabusOnClientFallback(params: {
   fileName?: string;
   mimeType?: string;
   base64Data?: string;
+  files?: Array<{
+    fileName?: string;
+    mimeType?: string;
+    base64Data: string;
+  }>;
   extractedText?: string;
 }): Promise<ParsedSyllabusResponse> {
-  const { fileName, mimeType, base64Data, extractedText } = params;
+  const { fileName, mimeType, base64Data, files, extractedText } = params;
 
   // 1. Try client-side Gemini SDK if API key was injected at build time
   const apiKey =
@@ -383,9 +388,22 @@ export async function parseSyllabusOnClientFallback(params: {
         parts.push({
           text: `Syllabus (${fileName || 'syllabus'}):\n${extractedText.slice(
             0,
-            15000
+            45000
           )}`,
         });
+      }
+
+      if (Array.isArray(files) && files.length > 0) {
+        for (const item of files) {
+          if (item.base64Data) {
+            parts.push({
+              inlineData: {
+                mimeType: item.mimeType || 'image/jpeg',
+                data: item.base64Data,
+              },
+            });
+          }
+        }
       } else if (base64Data && mimeType) {
         parts.push({
           inlineData: {

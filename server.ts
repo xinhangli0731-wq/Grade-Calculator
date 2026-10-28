@@ -172,10 +172,15 @@ async function startServer() {
 
   app.post('/api/parse-syllabus', async (req, res) => {
     try {
-      const { fileName, mimeType, base64Data, rawText } = req.body as {
+      const { fileName, mimeType, base64Data, files, rawText } = req.body as {
         fileName?: string;
         mimeType?: string;
         base64Data?: string;
+        files?: Array<{
+          fileName?: string;
+          mimeType?: string;
+          base64Data: string;
+        }>;
         rawText?: string;
       };
 
@@ -184,16 +189,29 @@ async function startServer() {
 
       if (combinedExtractedText.length > 0) {
         parts.push({
-          text: `Syllabus:\n${combinedExtractedText.slice(0, 15000)}`,
+          text: `Syllabus / Course Website Text:\n${combinedExtractedText.slice(0, 45000)}`,
         });
       }
 
-      if (base64Data) {
-        const cleanBase64 = base64Data.includes(',')
-          ? base64Data.split(',')[1]
-          : base64Data;
-        const resolvedMime = inferMimeType(fileName, mimeType);
-        const lowerName = (fileName || '').toLowerCase();
+      const incomingFiles: Array<{
+        fileName?: string;
+        mimeType?: string;
+        base64Data: string;
+      }> = [];
+
+      if (Array.isArray(files) && files.length > 0) {
+        incomingFiles.push(...files);
+      } else if (base64Data) {
+        incomingFiles.push({ fileName, mimeType, base64Data });
+      }
+
+      for (const fileItem of incomingFiles) {
+        if (!fileItem.base64Data) continue;
+        const cleanBase64 = fileItem.base64Data.includes(',')
+          ? fileItem.base64Data.split(',')[1]
+          : fileItem.base64Data;
+        const resolvedMime = inferMimeType(fileItem.fileName, fileItem.mimeType);
+        const lowerName = (fileItem.fileName || '').toLowerCase();
 
         const isPdf = resolvedMime === 'application/pdf' || lowerName.endsWith('.pdf');
         const isDocx =
@@ -217,7 +235,7 @@ async function startServer() {
             if (pdfText.length >= 60) {
               combinedExtractedText += `\n${pdfText}`;
               parts.push({
-                text: `Syllabus PDF (${fileName || 'syllabus.pdf'}):\n${pdfText.slice(0, 15000)}`,
+                text: `Syllabus PDF (${fileItem.fileName || 'syllabus.pdf'}):\n${pdfText.slice(0, 35000)}`,
               });
             } else {
               parts.push({
@@ -240,13 +258,13 @@ async function startServer() {
           const extracted = await mammoth.extractRawText({ buffer });
           combinedExtractedText += `\n${extracted.value}`;
           parts.push({
-            text: `Syllabus Word (${fileName || 'syllabus.docx'}):\n${extracted.value.slice(0, 15000)}`,
+            text: `Syllabus Word (${fileItem.fileName || 'syllabus.docx'}):\n${extracted.value.slice(0, 35000)}`,
           });
         } else if (isTextLike) {
           const decodedText = Buffer.from(cleanBase64, 'base64').toString('utf-8');
           combinedExtractedText += `\n${decodedText}`;
           parts.push({
-            text: `Syllabus (${fileName || 'syllabus'}):\n${decodedText.slice(0, 15000)}`,
+            text: `Syllabus (${fileItem.fileName || 'syllabus'}):\n${decodedText.slice(0, 35000)}`,
           });
         } else {
           parts.push({
@@ -259,7 +277,7 @@ async function startServer() {
       }
 
       if (parts.length === 0) {
-        res.status(400).json({ error: 'Please provide a syllabus file, screenshot, or text.' });
+        res.status(400).json({ error: 'Please provide syllabus screenshots, files, or text.' });
         return;
       }
 
