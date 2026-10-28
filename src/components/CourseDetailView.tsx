@@ -77,8 +77,8 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
   const inProgress = calculateInProgressMetrics(course);
   const beforeSemester = calculateBeforeSemesterRequirements(course);
 
-  const [activeMode, setActiveMode] = useState<'in-progress' | 'before-semester'>(() =>
-    inProgress.hasCompletedAssessments ? 'in-progress' : 'before-semester'
+  const [activeMode, setActiveMode] = useState<'in-progress' | 'before-semester'>(
+    'in-progress'
   );
 
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -128,6 +128,35 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
       c.id === compId ? { ...c, canBeDropped: !(c.canBeDropped !== false) } : c
     );
     onUpdateCourse({ ...course, components: updated });
+  };
+
+  const handleSplitExamComponent = (comp: GradeComponent, count: number) => {
+    const clamped = Math.max(2, Math.min(6, count));
+    const partWeight = Number((comp.weight / clamped).toFixed(2));
+    const splitItems: GradeComponent[] = Array.from({ length: clamped }, (_, idx) => ({
+      id: `${comp.id}-m${idx + 1}-${Date.now()}`,
+      name: `Midterm ${idx + 1}`,
+      weight:
+        idx === clamped - 1
+          ? Number((comp.weight - partWeight * (clamped - 1)).toFixed(2))
+          : partWeight,
+      categoryType: 'exam',
+      canBeDropped: comp.canBeDropped ?? true,
+      status: 'remaining',
+      earnedPoints: null,
+      maxPoints: comp.maxPoints || 100,
+      assumedPercentage: 100,
+      whatIfPercentage: null,
+    }));
+
+    const idx = course.components.findIndex((c) => c.id === comp.id);
+    if (idx === -1) return;
+    const nextComponents = [...course.components];
+    nextComponents.splice(idx, 1, ...splitItems);
+    onUpdateCourse({
+      ...course,
+      components: nextComponents,
+    });
   };
 
   const handleScoreInputChange = (comp: GradeComponent, raw: string) => {
@@ -604,15 +633,48 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
               {course.components.map((comp) => {
                 const isNonExam = canTrackByCount(comp);
                 const effWeight = effectiveWeightMap[comp.id] ?? comp.weight;
+                const isUnnumberedNonFinalExam =
+                  !isNonExam &&
+                  !/\bfinal\b/i.test(comp.name) &&
+                  !/\b(midterm|exam|test)\s*#?\d+\b/i.test(comp.name);
+                const examTarget = !isNonExam
+                  ? targetReq?.perAssessmentBreakdown.find((b) => b.id === comp.id)
+                  : undefined;
+
                 return (
                   <div
                     key={comp.id}
-                    className="py-3.5 flex items-center justify-between gap-4"
+                    className="py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
                   >
                     <div>
-                      <p className="text-sm font-semibold text-slate-900">{comp.name}</p>
-                      <p className="text-xs text-slate-500 font-mono tabular-nums">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="text-sm font-semibold text-slate-900">{comp.name}</p>
+                        {isUnnumberedNonFinalExam && (
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleSplitExamComponent(comp, 3)}
+                              className="px-2 py-0.5 text-[11px] font-semibold text-white bg-indigo-600 rounded hover:bg-indigo-700 cursor-pointer"
+                            >
+                              拆分为 3 场 Midterm
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSplitExamComponent(comp, 2)}
+                              className="px-2 py-0.5 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100 cursor-pointer"
+                            >
+                              拆分为 2 场
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                      <p className="text-xs text-slate-500 font-mono tabular-nums mt-0.5">
                         Effective Weight: {effWeight}%
+                        {examTarget && (
+                          <span className="ml-2 font-semibold text-indigo-600">
+                            · Need {formatPct(examTarget.requiredPercentage)} for {course.targetGrade}
+                          </span>
+                        )}
                       </p>
                     </div>
 
@@ -630,11 +692,19 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                         <span className="text-xs text-slate-500 font-mono">%</span>
                       </div>
                     ) : (
-                      <span className="text-xs text-indigo-600 font-medium">
-                        {beforeSemester.examDropCount > 0 && comp.canBeDropped !== false
-                          ? `Best ${beforeSemester.countedExamCount} of ${beforeSemester.totalDroppableExamCount} count`
-                          : 'Exam to calculate'}
-                      </span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number"
+                          placeholder="Test / 测分 %"
+                          value={comp.whatIfPercentage ?? ''}
+                          onChange={(e) => {
+                            handleWhatIfChange(comp.id, e.target.value);
+                            setActiveMode('in-progress');
+                          }}
+                          title="Enter a test score for this exam to see what you need on the other exams"
+                          className="w-28 px-2.5 py-1.5 text-xs font-mono tabular-nums text-right rounded-lg border border-dashed border-indigo-200 bg-indigo-50/30 text-indigo-900 placeholder:text-indigo-400 focus:bg-white focus:border-indigo-600 focus:outline-none"
+                        />
+                      </div>
                     )}
                   </div>
                 );
@@ -655,6 +725,15 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                   !isNonExam &&
                   inProgress.examDropCount > 0 &&
                   targetReq?.droppedComponentNames.includes(comp.name);
+
+                const isUnnumberedNonFinalExam =
+                  !isNonExam &&
+                  !/\bfinal\b/i.test(comp.name) &&
+                  !/\b(midterm|exam|test)\s*#?\d+\b/i.test(comp.name);
+
+                const examTarget = !isNonExam
+                  ? targetReq?.perAssessmentBreakdown.find((b) => b.id === comp.id)
+                  : undefined;
 
                 const isSubExpanded = isNonExam && expandedSubId === comp.id;
                 const subItems = comp.subItems || [];
@@ -688,6 +767,26 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                           >
                             {comp.name}
                           </p>
+
+                          {/* If an exam row is unnumbered (e.g. "Exam", "Exams", "Midterm"), offer 1-click split into 3 Midterms */}
+                          {isUnnumberedNonFinalExam && (
+                            <div className="inline-flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleSplitExamComponent(comp, 3)}
+                                className="px-2 py-0.5 text-[11px] font-semibold text-white bg-indigo-600 rounded hover:bg-indigo-700 cursor-pointer"
+                              >
+                                拆分为 3 场 Midterm
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleSplitExamComponent(comp, 2)}
+                                className="px-2 py-0.5 text-[11px] font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100 cursor-pointer"
+                              >
+                                拆分为 2 场
+                              </button>
+                            </div>
+                          )}
 
                           {/* Show Track Each / 按次算分 on Quizzes, Homework, Labs, and all non-Midterm/Final components */}
                           {isNonExam && (
@@ -739,13 +838,35 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                           )}
                         </div>
 
-                        <p className="text-xs text-slate-500 font-mono tabular-nums pl-6 mt-0.5">
-                          {isDroppedInTarget
-                            ? `Dropped (0% effective · original ${effWeight}%)`
-                            : `Weight: ${effWeight}%`}
+                        <p className="text-xs text-slate-500 font-mono tabular-nums pl-6 mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+                          <span>
+                            {isDroppedInTarget
+                              ? `Dropped (0% effective · original ${effWeight}%)`
+                              : `Weight: ${effWeight}%`}
+                          </span>
                           {showConvertedBadge && (
-                            <span className="ml-2 text-indigo-600 font-semibold">
+                            <span className="text-indigo-600 font-semibold">
                               → {formatPct(actualPct)}
+                            </span>
+                          )}
+                          {!isNonExam && !isCompleted && comp.whatIfPercentage !== null && (
+                            <span className="px-1.5 py-0.5 text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200 rounded">
+                              Testing / 模拟测分: {comp.whatIfPercentage}%
+                            </span>
+                          )}
+                          {!isNonExam && !isCompleted && comp.whatIfPercentage === null && examTarget && (
+                            <span
+                              className={`px-1.5 py-0.5 text-[11px] font-semibold rounded ${
+                                examTarget.isDroppedAtTarget || targetReq?.feasibility === 'secured'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : targetReq?.feasibility === 'impossible'
+                                  ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                                  : 'bg-indigo-50 text-indigo-700 border border-indigo-100'
+                              }`}
+                            >
+                              {examTarget.isDroppedAtTarget || targetReq?.feasibility === 'secured'
+                                ? `For ${course.targetGrade}: 0% needed (Can Drop)`
+                                : `For ${course.targetGrade} need: ${formatPct(examTarget.requiredPercentage)} (${formatScoreNumber(examTarget.requiredPoints)}/${examTarget.maxPoints})`}
                             </span>
                           )}
                         </p>
@@ -757,7 +878,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                             type="text"
                             value={textVal}
                             onChange={(e) => handleScoreInputChange(comp, e.target.value)}
-                            placeholder="Not graded"
+                            placeholder="Score (e.g. 90)"
                             className={`w-28 px-3 py-1.5 text-sm font-mono tabular-nums text-right rounded-lg border focus:outline-none ${
                               isCompleted
                                 ? 'bg-emerald-50/40 border-emerald-300 font-bold text-slate-900 focus:border-indigo-600'
@@ -774,14 +895,14 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                         {!isCompleted && (
                           <input
                             type="number"
-                            placeholder="What-if %"
+                            placeholder="Test / 测分 %"
                             value={comp.whatIfPercentage ?? ''}
                             onChange={(e) => handleWhatIfChange(comp.id, e.target.value)}
-                            title="Enter a hypothetical What-If percentage score"
-                            className={`w-24 px-2.5 py-1.5 text-xs font-mono tabular-nums text-right rounded-lg border focus:outline-none ${
+                            title="Enter a hypothetical test score (%) for this exam to see how much you need on the remaining exams"
+                            className={`w-28 px-2.5 py-1.5 text-xs font-mono tabular-nums text-right rounded-lg border focus:outline-none ${
                               comp.whatIfPercentage !== null
                                 ? 'bg-amber-50 border-amber-300 font-bold text-amber-900'
-                                : 'bg-slate-50/70 border-dashed border-slate-200 text-slate-600 placeholder:text-slate-400 focus:bg-white focus:border-indigo-600'
+                                : 'bg-indigo-50/30 border-dashed border-indigo-200 text-slate-700 placeholder:text-indigo-400 focus:bg-white focus:border-indigo-600'
                             }`}
                           />
                         )}

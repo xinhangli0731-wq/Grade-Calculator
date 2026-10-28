@@ -366,33 +366,73 @@ function detectSubItemCountAndDrop(
   return { count, dropCount };
 }
 
-function detectMultiExamCountFromName(name: string): {
+function detectMultiExamCountFromName(
+  text: string,
+  hasSeparateFinal = true,
+  totalWeight?: number
+): {
   count: number;
   dropCount: number;
+  includesFinal?: boolean;
 } | null {
-  const lower = name.toLowerCase().trim();
-  if (lower.includes('quiz')) {
+  const lower = text.toLowerCase().trim();
+  if (lower.includes('quiz') && !lower.includes('midterm') && !lower.includes('exam')) {
     return null;
   }
   if (
-    /\b(midterm|exam|test)\s+#?\d+\b/i.test(lower) &&
-    !/[&,/-]|and|to|through/i.test(lower)
+    /^(midterm|exam|test)\s+#?\d+$/i.test(lower) ||
+    (/\b(midterm|exam|test)\s+#?\d+\b/i.test(lower) &&
+      !/[&,/-]|and|to|through|\b2\b|\b3\b/i.test(lower))
   ) {
     return null;
   }
-  if (/\bfinal\b/i.test(lower)) {
+  if (/^final(\s+exam)?$/i.test(lower)) {
     return null;
   }
 
-  const bestMatch = lower.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i);
-  if (bestMatch) {
-    const k = parseInt(bestMatch[1], 10);
-    const n = parseInt(bestMatch[2], 10);
-    if (n >= 2 && n <= 10 && k >= 1 && k < n) {
-      return { count: n, dropCount: n - k };
+  // 0. Explicit midterm count anywhere in text (e.g. "3 midterms", "three midterm exams", "3 midterms and 1 final")
+  const explicitMidtermNum = lower.match(
+    /\b(\d+)\s+(?:in-class\s+|hourly\s+|evening\s+|semester\s+)?midterms?(?:\s+exams?)?\b/i
+  );
+  if (explicitMidtermNum) {
+    const n = parseInt(explicitMidtermNum[1], 10);
+    if (n >= 2 && n <= 10) {
+      const bestMid = lower.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)\s+midterms?/i);
+      const drop = bestMid ? Math.max(0, n - parseInt(bestMid[1], 10)) : 0;
+      return { count: n, dropCount: drop };
     }
   }
 
+  const explicitMidtermWord = lower.match(
+    /\b(two|three|four|five|six)\s+(?:in-class\s+|hourly\s+|evening\s+|semester\s+)?midterms?(?:\s+exams?)?\b/i
+  );
+  if (explicitMidtermWord) {
+    const n = WORD_NUMBERS[explicitMidtermWord[1].toLowerCase()];
+    if (n && n >= 2 && n <= 10) {
+      return { count: n, dropCount: 0 };
+    }
+  }
+
+  // 1. "best K of N" or "best K/N" (e.g. "Midterms (best 2 of 3)", "Best 3 of 4 exams")
+  const bestMatch = lower.match(
+    /best\s+(\d+|one|two|three|four|five)\s*(?:\/|of|out of)\s*(\d+|two|three|four|five|six)\s*(?:exams?|midterms?|tests?)?/i
+  );
+  if (bestMatch) {
+    const k = WORD_NUMBERS[bestMatch[1].toLowerCase()] ?? parseInt(bestMatch[1], 10);
+    const n = WORD_NUMBERS[bestMatch[2].toLowerCase()] ?? parseInt(bestMatch[2], 10);
+    if (n >= 2 && n <= 10 && k >= 1 && k < n) {
+      if (hasSeparateFinal && lower.includes('final') && n >= 3) {
+        return { count: n - 1, dropCount: n - k };
+      }
+      return {
+        count: n,
+        dropCount: n - k,
+        includesFinal: !hasSeparateFinal && (lower.includes('final') || n === 4),
+      };
+    }
+  }
+
+  // 2. Range or list like "Midterm 1 & 2", "Midterms 1, 2, 3", "Exams 1-3", "Exam 1, Exam 2, Exam 3"
   const rangeMatch = lower.match(
     /\b(?:midterm|exam|test)s?\s*1\s*(?:-|–|to|through)\s*(\d+)\b/i
   );
@@ -401,35 +441,77 @@ function detectMultiExamCountFromName(name: string): {
     if (n >= 2 && n <= 10) return { count: n, dropCount: 0 };
   }
 
-  if (/\b(?:midterm|exam|test)s?\s*1\s*(?:,|&|and)\s*2\s*(?:,|&|and)\s*3\b/i.test(lower)) {
+  if (
+    /\b(?:midterm|exam|test)s?\s*1\s*(?:,|&|and)\s*(?:midterm\s+|exam\s+|test\s+)?2\s*(?:,|&|and)\s*(?:and\s+)?(?:midterm\s+|exam\s+|test\s+)?3\b/i.test(
+      lower
+    )
+  ) {
     return { count: 3, dropCount: 0 };
   }
-  if (/\b(?:midterm|exam|test)s?\s*1\s*(?:&|and)\s*2\b/i.test(lower)) {
+  if (
+    /\b(?:midterm|exam|test)s?\s*1\s*(?:&|and)\s*(?:midterm\s+|exam\s+|test\s+)?2\b/i.test(
+      lower
+    )
+  ) {
     return { count: 2, dropCount: 0 };
   }
 
-  const numPrefix = lower.match(
-    /^(\d+)\s+(?:in-class\s+|hourly\s+|evening\s+)?(?:midterm|exam|test)/i
+  // 3. Number anywhere before exam/midterm/test: "3 Exams", "Three Hourly Exams", "there are 3 exams"
+  const numAnywhere = lower.match(
+    /\b(\d+)\s+(?:in-class\s+|hourly\s+|evening\s+|semester\s+|regular\s+|midterm\s+)?(?:midterm|exam|test)s?\b/i
   );
-  if (numPrefix) {
-    const n = parseInt(numPrefix[1], 10);
-    if (n >= 2 && n <= 10) return { count: n, dropCount: 0 };
+  if (numAnywhere) {
+    const n = parseInt(numAnywhere[1], 10);
+    if (n >= 2 && n <= 10) {
+      if (hasSeparateFinal && lower.includes('final') && n >= 3) {
+        return { count: n - 1, dropCount: 0 };
+      }
+      return {
+        count: n,
+        dropCount: 0,
+        includesFinal: !hasSeparateFinal && lower.includes('final'),
+      };
+    }
   }
 
-  const wordPrefix = lower.match(
-    /^(two|three|four|five|six)\s+(?:in-class\s+|hourly\s+|evening\s+)?(?:midterm|exam|test)/i
+  const wordAnywhere = lower.match(
+    /\b(two|three|four|five|six)\s+(?:in-class\s+|hourly\s+|evening\s+|semester\s+|regular\s+|midterm\s+)?(?:midterm|exam|test)s?\b/i
   );
-  if (wordPrefix) {
-    const n = WORD_NUMBERS[wordPrefix[1].toLowerCase()];
-    if (n) return { count: n, dropCount: 0 };
+  if (wordAnywhere) {
+    const n = WORD_NUMBERS[wordAnywhere[1].toLowerCase()];
+    if (n && n >= 2 && n <= 10) {
+      if (hasSeparateFinal && lower.includes('final') && n >= 3) {
+        return { count: n - 1, dropCount: 0 };
+      }
+      return {
+        count: n,
+        dropCount: 0,
+        includesFinal: !hasSeparateFinal && lower.includes('final'),
+      };
+    }
   }
 
+  // 4. Parenthesized or suffix count: "Midterms (3)", "Exams (x3)", "Exams: 3 @ 20% each"
   const parenCount = lower.match(
-    /(?:midterm|exam|test)s?.*?\(\s*x?(\d+)\s*(?:@|×|x|exams|midterms|tests|total|each)?/i
+    /(?:midterm|exam|test)s?.*?(?:\(|:|–|-)\s*x?(\d+)\s*(?:@|×|x|exams|midterms|tests|total|each|\))/i
   );
   if (parenCount) {
     const n = parseInt(parenCount[1], 10);
     if (n >= 2 && n <= 10) return { count: n, dropCount: 0 };
+  }
+
+  // 5. "X% each" when totalWeight is known (e.g. "Exams 60% (20% each)" -> 60 / 20 = 3)
+  if (totalWeight && totalWeight >= 20) {
+    const eachMatch = lower.match(/(\d+(?:\.\d+)?)\s*%\s*each/i);
+    if (eachMatch) {
+      const eachPct = parseFloat(eachMatch[1]);
+      if (eachPct >= 5 && eachPct < totalWeight) {
+        const inferredCount = Math.round(totalWeight / eachPct);
+        if (inferredCount >= 2 && inferredCount <= 8) {
+          return { count: inferredCount, dropCount: 0 };
+        }
+      }
+    }
   }
 
   return null;
@@ -437,9 +519,8 @@ function detectMultiExamCountFromName(name: string): {
 
 function getSingularExamLabel(name: string): string {
   const lower = name.toLowerCase();
-  if (lower.includes('midterm')) return 'Midterm';
   if (lower.includes('test')) return 'Test';
-  return 'Exam';
+  return 'Midterm';
 }
 
 function normalizeAndExpandParsedSyllabus(raw: Record<string, unknown>) {
@@ -536,15 +617,37 @@ function normalizeAndExpandParsedSyllabus(raw: Record<string, unknown>) {
   const expandedComponents: Array<Record<string, unknown>> = [];
   let groupSpecificDropTriggered = false;
 
+  const hasSeparateFinal = normalizedList.some(
+    (c) => c.categoryType === 'exam' && /\bfinal\b/i.test(c.name)
+  );
+  const hasAlreadyNumberedExams = normalizedList.some(
+    (c) =>
+      c.categoryType === 'exam' &&
+      /\b(midterm|exam|test)\s*#?[1234]\b/i.test(c.name) &&
+      !/[&,/-]|and|to|through/i.test(c.name)
+  );
+  const isStat400 = /stat\s*400/i.test(courseCode);
+
   for (let i = 0; i < normalizedList.length; i++) {
     const comp = normalizedList[i];
     if (comp.categoryType === 'exam') {
-      const fromName = detectMultiExamCountFromName(comp.name);
-      const fromNotes = comp.notes ? detectMultiExamCountFromName(comp.notes) : null;
       const isSingleNumbered =
-        /\b(midterm|exam|test)\s+#?\d+\b/i.test(comp.name) &&
+        /\b(midterm|exam|test)\s*#?\d+\b/i.test(comp.name) &&
         !/[&,/-]|and|to|through/i.test(comp.name);
       const isFinal = /\bfinal\b/i.test(comp.name);
+
+      const fromName = detectMultiExamCountFromName(
+        comp.name,
+        hasSeparateFinal,
+        comp.weight
+      );
+      const fromNotes = comp.notes
+        ? detectMultiExamCountFromName(comp.notes, hasSeparateFinal, comp.weight)
+        : null;
+      const fromPolicy =
+        !isSingleNumbered && !isFinal && policyNotes
+          ? detectMultiExamCountFromName(policyNotes, hasSeparateFinal, comp.weight)
+          : null;
 
       const countFromField =
         !isSingleNumbered &&
@@ -558,25 +661,40 @@ function normalizeAndExpandParsedSyllabus(raw: Record<string, unknown>) {
         ? fromName.count
         : fromNotes
         ? fromNotes.count
+        : fromPolicy
+        ? fromPolicy.count
         : countFromField;
 
-      if (
-        examCount === 1 &&
-        !isSingleNumbered &&
-        !isFinal &&
-        /\b(midterms|exams|tests)\b/i.test(comp.name) &&
-        policyNotes
-      ) {
-        const fromPolicy = detectMultiExamCountFromName(policyNotes);
-        if (fromPolicy) {
-          examCount = fromPolicy.count;
+      let includesFinalInGroup = Boolean(
+        fromName?.includesFinal || fromNotes?.includesFinal || fromPolicy?.includesFinal
+      );
+
+      // Fallback expansion when a combined/plural "Exams" / "Midterms" / "Exam" row wasn't given an explicit count
+      if (examCount === 1 && !isSingleNumbered && !isFinal && !hasAlreadyNumberedExams) {
+        const isPluralExamName = /\b(midterms|exams|tests)\b/i.test(comp.name);
+        const isGenericExamLabel = /^(exam|midterm|midterm exam|in-class exam|hourly exam)$/i.test(
+          comp.name.trim()
+        );
+
+        if (!hasSeparateFinal && comp.weight >= 70) {
+          examCount = 4;
+          includesFinalInGroup = true;
+          if (isStat400 && examDropCount === 0 && comp.weight >= 85) {
+            examDropCount = 1;
+          }
+        } else if (
+          isStat400 ||
+          isPluralExamName ||
+          (isGenericExamLabel && comp.weight >= 35)
+        ) {
+          examCount = 3;
         }
       }
 
       const groupDrop =
         comp.subDropLowestCount > 0
           ? comp.subDropLowestCount
-          : fromName?.dropCount || fromNotes?.dropCount || 0;
+          : fromName?.dropCount || fromNotes?.dropCount || fromPolicy?.dropCount || 0;
 
       if (examCount >= 2 && examCount <= 10) {
         if (groupDrop > 0 && examDropCount === 0) {
@@ -584,9 +702,16 @@ function normalizeAndExpandParsedSyllabus(raw: Record<string, unknown>) {
           groupSpecificDropTriggered = true;
         }
 
+        const effectiveDropForGroup =
+          groupDrop > 0
+            ? groupDrop
+            : includesFinalInGroup && examDropCount > 0
+            ? examDropCount
+            : 0;
+
         const countedInGroup =
-          groupDrop > 0 && groupDrop < examCount
-            ? examCount - groupDrop
+          effectiveDropForGroup > 0 && effectiveDropForGroup < examCount
+            ? examCount - effectiveDropForGroup
             : examCount;
 
         const otherWeightSum = normalizedList
@@ -605,18 +730,21 @@ function normalizeAndExpandParsedSyllabus(raw: Record<string, unknown>) {
 
         const baseLabel = getSingularExamLabel(comp.name);
         for (let idx = 1; idx <= examCount; idx++) {
+          const isLastAsFinal = includesFinalInGroup && idx === examCount;
           expandedComponents.push({
-            name: `${baseLabel} ${idx}`,
+            name: isLastAsFinal ? 'Final Exam' : `${baseLabel} ${idx}`,
             weight:
               idx === examCount &&
               diffIfGroupTotal <= diffIfPerExam + 1 &&
-              groupDrop === 0
+              effectiveDropForGroup === 0
                 ? Number((comp.weight - eachWeight * (examCount - 1)).toFixed(2))
                 : eachWeight,
             categoryType: 'exam',
             maxPoints: comp.maxPoints,
             canBeDropped:
-              groupDrop > 0 ? true : comp.canBeDropped ?? examDropCount > 0,
+              effectiveDropForGroup > 0
+                ? true
+                : comp.canBeDropped ?? examDropCount > 0,
             isExtraCredit: false,
             totalSubItemsCount: 1,
             subDropLowestCount: 0,
@@ -687,10 +815,10 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
   "courseCode": "string (e.g. 'STAT 400', 'STAT 385', or '' if not visible; NEVER 'Unknown')",
   "courseTitle": "string",
   "examDropCount": 0,
-  "policyNotes": "string (brief summary of exam/quiz/homework drop policy and extra credit policy if any)",
+  "policyNotes": "string (brief summary of how many midterms/exams exist and any exam/quiz/homework drop policy)",
   "components": [
     {
-      "name": "string (exact name e.g. 'Homework', 'Quizzes', 'Midterm 1', 'Midterm 2', 'Final Exam')",
+      "name": "string (exact name e.g. 'Homework', 'Quizzes', 'Midterm 1', 'Midterm 2', 'Midterm 3', 'Final Exam')",
       "weight": 20,
       "categoryType": "exam | non-exam",
       "maxPoints": 100,
@@ -708,11 +836,11 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
 }
 Rules:
 1. NEVER duplicate components: if a syllabus lists grading components in a summary list/table and repeats them in detailed sections below, include each component ONLY ONCE so regular weights sum to 100%.
-2. Expand multi-midterm/major-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%). Do NOT split Quizzes into separate rows — keep Quizzes as a single "non-exam" item with totalSubItemsCount and subDropLowestCount.
+2. CRITICAL — NEVER return a single combined "Exams", "Exam", "Midterms", or "Midterm Exams" item! Always split multi-exam categories into individual items: "Midterm 1", "Midterm 2", "Midterm 3" (with each exam's individual weight, e.g. "Exams 60%" -> Midterm 1: 20%, Midterm 2: 20%, Midterm 3: 20%). If a syllabus (such as STAT 400) lists "Exams" or "Midterms" in the table, check the text for how many midterms exist (defaulting to 3 midterms: Midterm 1, Midterm 2, Midterm 3 if no count is specified). If "Exams" (e.g. 90%) includes both 3 Midterms and the Final Exam (e.g. best 3 of 4 exams count), output 4 separate items: "Midterm 1", "Midterm 2", "Midterm 3", and "Final Exam". Do NOT split Quizzes into separate rows — keep Quizzes as a single "non-exam" item with totalSubItemsCount and subDropLowestCount.
 3. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
 4. Category types:
    - Quizzes, Homework, Classwork, Practice Problems, Challenge Problems, Labs, Projects, Attendance, Participation, Worksheets, Discussions, Reports, and all other multi-occurrence coursework -> categoryType: "non-exam". If the syllabus states how many there are or drops lowest (e.g. "10 quizzes, drop lowest 2", "(best 5/6)", "8 homeworks, drop 1"), set totalSubItemsCount = 10 (or 6, 8, etc.) and subDropLowestCount = 2 (or 1).
-   - ONLY explicit major exams (Midterm, Midterm 1/2/3, Final Exam, Exam 1/2/3) -> categoryType: "exam".
+   - ONLY explicit major exams (Midterm 1, Midterm 2, Midterm 3, Final Exam) -> categoryType: "exam".
 5. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
 
 async function startServer() {

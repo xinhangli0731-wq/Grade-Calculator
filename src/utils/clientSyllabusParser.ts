@@ -53,10 +53,10 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
   "courseCode": "string (e.g. 'STAT 400', 'STAT 385', or '' if not visible; NEVER 'Unknown')",
   "courseTitle": "string",
   "examDropCount": 0,
-  "policyNotes": "string (brief summary of exam/quiz/homework drop policy if any)",
+  "policyNotes": "string (brief summary of how many midterms/exams exist and any exam/quiz/homework drop policy)",
   "components": [
     {
-      "name": "string (exact name e.g. 'Homework', 'Quizzes', 'Midterm 1', 'Midterm 2', 'Final Exam')",
+      "name": "string (exact name e.g. 'Homework', 'Quizzes', 'Midterm 1', 'Midterm 2', 'Midterm 3', 'Final Exam')",
       "weight": 20,
       "categoryType": "exam | non-exam",
       "maxPoints": 100,
@@ -73,11 +73,11 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
 }
 Rules:
 1. NEVER duplicate components: if a syllabus lists grading components in a summary list/table and repeats them in detailed sections below, include each component ONLY ONCE so regular weights sum to 100%.
-2. Expand multi-midterm/major-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%). Do NOT split Quizzes into separate rows — keep Quizzes as a single "non-exam" item with totalSubItemsCount and subDropLowestCount.
+2. CRITICAL — NEVER return a single combined "Exams", "Exam", "Midterms", or "Midterm Exams" item! Always split multi-exam categories into individual items: "Midterm 1", "Midterm 2", "Midterm 3" (with each exam's individual weight, e.g. "Exams 60%" -> Midterm 1: 20%, Midterm 2: 20%, Midterm 3: 20%). If a syllabus (such as STAT 400) lists "Exams" or "Midterms" in the table, check the text for how many midterms exist (defaulting to 3 midterms: Midterm 1, Midterm 2, Midterm 3 if no count is specified). If "Exams" (e.g. 90%) includes both 3 Midterms and the Final Exam (e.g. best 3 of 4 exams count), output 4 separate items: "Midterm 1", "Midterm 2", "Midterm 3", and "Final Exam". Do NOT split Quizzes into separate rows — keep Quizzes as a single "non-exam" item with totalSubItemsCount and subDropLowestCount.
 3. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
 4. Category types:
    - Quizzes, Homework, Classwork, Practice Problems, Challenge Problems, Labs, Projects, Attendance, Participation, Worksheets, Discussions, Reports, and all other multi-occurrence coursework -> categoryType: "non-exam". If the syllabus states how many there are or drops lowest (e.g. "10 quizzes, drop lowest 2", "(best 5/6)", "8 homeworks, drop 1"), set totalSubItemsCount = 10 (or 6, 8, etc.) and subDropLowestCount = 2 (or 1).
-   - ONLY explicit major exams (Midterm, Midterm 1/2/3, Final Exam, Exam 1/2/3) -> categoryType: "exam".
+   - ONLY explicit major exams (Midterm 1, Midterm 2, Midterm 3, Final Exam) -> categoryType: "exam".
 5. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
 
 /**
@@ -223,6 +223,14 @@ export function smartParseSyllabusText(
     .map((l) => l.trim())
     .filter(Boolean);
 
+  // Extract any lines mentioning midterms/exams/drops so normalizeAndExpandParsedSyllabus has full context
+  const examPolicySnippets = lines
+    .filter((l) =>
+      /\b(midterms?|exams?|tests?|drop|best\s+\d|lowest)\b/i.test(l)
+    )
+    .slice(0, 8)
+    .join(' | ');
+
   for (const line of lines) {
     if (/\bA\+\b.*\bA\b.*\bB\+\b/i.test(line)) continue;
     // Stop adding if we already reached 100% and no exam drop policy is active
@@ -261,41 +269,6 @@ export function smartParseSyllabusText(
         const subDrop =
           detectedSub.dropCount ?? (isNonExam && hasHwDrop ? 1 : 0);
 
-        const lower = rawName.toLowerCase();
-        const multiExamMatch =
-          !isNonExam &&
-          (rawName.match(/^(\d+)\s+(midterm|exam|test)s?/i) ||
-            rawName.match(/(midterm|exam|test)s?\s*\((\d+)\)/i) ||
-            line.match(/(\d+)\s*(?:midterms|exams|tests).*?(\d+)\s*%\s*each/i));
-
-        if (multiExamMatch) {
-          const count = parseInt(
-            multiExamMatch[1].match(/^\d+$/)
-              ? multiExamMatch[1]
-              : multiExamMatch[2],
-            10
-          );
-          if (count >= 2 && count <= 8) {
-            const baseLabel = lower.includes('midterm') ? 'Midterm' : 'Exam';
-            const eachMatch = line.match(/(\d+(?:\.\d+)?)\s*%\s*each/i);
-            const eachWeight = eachMatch
-              ? parseFloat(eachMatch[1])
-              : Number((weight / count).toFixed(2));
-            for (let i = 1; i <= count; i++) {
-              components.push({
-                name: `${baseLabel} ${i}`,
-                weight: eachWeight,
-                categoryType: 'exam',
-                maxPoints: 100,
-                canBeDropped: hasExamDrop,
-              });
-              runningWeightSum += eachWeight;
-            }
-            seenBaseKeys.add(baseKey);
-            continue;
-          }
-        }
-
         seenBaseKeys.add(baseKey);
         runningWeightSum += weight;
         components.push({
@@ -306,6 +279,7 @@ export function smartParseSyllabusText(
           canBeDropped: !isNonExam && hasExamDrop,
           totalSubItemsCount: subTotal,
           subDropLowestCount: subDrop,
+          notes: line,
         });
       }
     }
@@ -323,14 +297,21 @@ export function smartParseSyllabusText(
       },
       {
         name: 'Midterm 1',
-        weight: 30,
+        weight: 20,
         categoryType: 'exam',
         maxPoints: 100,
         canBeDropped: hasExamDrop,
       },
       {
         name: 'Midterm 2',
-        weight: 30,
+        weight: 20,
+        categoryType: 'exam',
+        maxPoints: 100,
+        canBeDropped: hasExamDrop,
+      },
+      {
+        name: 'Midterm 3',
+        weight: 20,
         categoryType: 'exam',
         maxPoints: 100,
         canBeDropped: hasExamDrop,
@@ -345,17 +326,19 @@ export function smartParseSyllabusText(
     );
   }
 
-  return {
+  return normalizeAndExpandParsedSyllabus({
     courseCode,
     courseTitle: '',
     examDropCount: hasExamDrop ? 1 : 0,
-    policyNotes: hasExamDrop
-      ? 'Lowest exam score dropped based on syllabus policy.'
-      : undefined,
+    policyNotes:
+      examPolicySnippets ||
+      (hasExamDrop
+        ? 'Lowest exam score dropped based on syllabus policy.'
+        : undefined),
     components,
     gradeScaleFound: gradeScale.length > 0,
     gradeScale: gradeScale.sort((a, b) => b.minPercentage - a.minPercentage),
-  };
+  });
 }
 
 /**

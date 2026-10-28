@@ -20,6 +20,82 @@ type AppScreen =
 
 const STORAGE_KEY = 'course_grade_planner_courses_v3';
 
+function migrateSavedCourseExams(course: Course): Course {
+  if (!course || !Array.isArray(course.components)) return course;
+
+  const hasNumberedExams = course.components.some(
+    (c) =>
+      c.categoryType === 'exam' &&
+      /\b(midterm|exam|test)\s*#?[1234]\b/i.test(c.name) &&
+      !/[&,/-]|and|to|through/i.test(c.name)
+  );
+  if (hasNumberedExams) return course;
+
+  const hasSeparateFinal = course.components.some(
+    (c) => c.categoryType === 'exam' && /\bfinal\b/i.test(c.name)
+  );
+  const isStat400 = /stat\s*400/i.test(course.courseCode || '');
+
+  let didExpand = false;
+  let nextDropCount = course.examDropCount || 0;
+  const nextComponents: Course['components'] = [];
+
+  for (const comp of course.components) {
+    const isFinal = /\bfinal\b/i.test(comp.name);
+    const isCombinedExam =
+      comp.categoryType === 'exam' &&
+      !isFinal &&
+      (isStat400 ||
+        /\b(exams|midterms|tests)\b/i.test(comp.name) ||
+        (/^(exam|midterm|midterm exam|hourly exam|in-class exam)$/i.test(
+          comp.name.trim()
+        ) &&
+          comp.weight >= 35));
+
+    if (isCombinedExam) {
+      didExpand = true;
+      const includeFinalToo = !hasSeparateFinal && comp.weight >= 70;
+      const count = includeFinalToo ? 4 : 3;
+      if (includeFinalToo && isStat400 && nextDropCount === 0 && comp.weight >= 85) {
+        nextDropCount = 1;
+      }
+      const counted =
+        includeFinalToo && nextDropCount > 0
+          ? Math.max(1, count - nextDropCount)
+          : count;
+      const eachWeight = Number((comp.weight / counted).toFixed(2));
+
+      for (let idx = 1; idx <= count; idx++) {
+        const isLastFinal = includeFinalToo && idx === count;
+        nextComponents.push({
+          ...comp,
+          id: `${comp.id}-m${idx}`,
+          name: isLastFinal ? 'Final Exam' : `Midterm ${idx}`,
+          weight:
+            idx === count && !(includeFinalToo && nextDropCount > 0)
+              ? Number((comp.weight - eachWeight * (count - 1)).toFixed(2))
+              : eachWeight,
+          categoryType: 'exam',
+          canBeDropped: comp.canBeDropped ?? true,
+          status: 'remaining',
+          earnedPoints: null,
+          whatIfPercentage: null,
+          subItems: undefined,
+        });
+      }
+    } else {
+      nextComponents.push(comp);
+    }
+  }
+
+  if (!didExpand) return course;
+  return {
+    ...course,
+    examDropCount: nextDropCount,
+    components: nextComponents,
+  };
+}
+
 export default function App() {
   const [courses, setCourses] = useState<Course[]>(() => {
     try {
@@ -27,7 +103,7 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) {
-          return parsed;
+          return parsed.map(migrateSavedCourseExams);
         }
       }
     } catch {

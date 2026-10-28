@@ -312,14 +312,24 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
     setComponents((prev) => prev.filter((c) => c.id !== id));
   };
 
-  const handleQuickSplit = (comp: GradeComponent) => {
+  const handleQuickSplit = (comp: GradeComponent, overrideCount?: number) => {
     const matchCount = comp.name.match(/(\d+)/);
-    const count = matchCount ? Math.min(10, Math.max(2, parseInt(matchCount[1], 10))) : 2;
+    const defaultCount =
+      comp.categoryType === 'exam' &&
+      (/stat\s*400/i.test(courseCode) || comp.weight >= 42 || comp.weight % 3 === 0)
+        ? 3
+        : 2;
+    const count =
+      overrideCount ??
+      (matchCount ? Math.min(10, Math.max(2, parseInt(matchCount[1], 10))) : defaultCount);
+
     const baseName =
-      comp.name
-        .replace(/^\d+\s+/, '')
-        .replace(/s$/i, '')
-        .trim() || 'Exam';
+      comp.categoryType === 'exam' && !/\bfinal\b/i.test(comp.name)
+        ? 'Midterm'
+        : comp.name
+            .replace(/^\d+\s+/, '')
+            .replace(/s$/i, '')
+            .trim() || 'Midterm';
     const partWeight = Number((comp.weight / count).toFixed(2));
 
     const splitItems: GradeComponent[] = Array.from({ length: count }, (_, idx) => ({
@@ -497,6 +507,10 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
               const isExam = comp.categoryType === 'exam';
               const subCount = comp.subItems?.length || 8;
               const subDrop = comp.subDropLowestCount ?? 0;
+              const isUnnumberedNonFinalExam =
+                isExam &&
+                !/\bfinal\b/i.test(comp.name) &&
+                !/\b(midterm|exam|test)\s*#?\d+\b/i.test(comp.name);
 
               return (
                 <div
@@ -576,7 +590,7 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
                     <button
                       type="button"
                       onClick={() => handleQuickSplit(comp)}
-                      title="Split into individual items"
+                      title="Split into individual exams"
                       className="p-1.5 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors cursor-pointer"
                     >
                       <Split className="w-4 h-4" />
@@ -591,6 +605,36 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
                       <Trash2 className="w-4 h-4" />
                     </button>
                   </div>
+
+                  {/* Quick Split Bar if an exam row is unnumbered (e.g. "Exam", "Exams", "Midterm") */}
+                  {isUnnumberedNonFinalExam && (
+                    <div className="flex flex-wrap items-center gap-2 pt-1 pl-1 text-xs">
+                      <span className="text-slate-500">
+                        有多场期中考试？一键拆分 / Split into individual midterms:
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => handleQuickSplit(comp, 2)}
+                        className="px-2 py-0.5 font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100 cursor-pointer"
+                      >
+                        拆分为 2 场 Midterm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleQuickSplit(comp, 3)}
+                        className="px-2 py-0.5 font-semibold text-white bg-indigo-600 border border-indigo-600 rounded hover:bg-indigo-700 cursor-pointer"
+                      >
+                        拆分为 3 场 Midterm
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleQuickSplit(comp, 4)}
+                        className="px-2 py-0.5 font-semibold text-indigo-700 bg-indigo-50 border border-indigo-200 rounded hover:bg-indigo-100 cursor-pointer"
+                      >
+                        拆分为 4 场 Midterm
+                      </button>
+                    </div>
+                  )}
 
                   {/* Direct Occurrence Count (总次数) & Drop Lowest Controls for Quizzes, Homework, Labs, etc. */}
                   {!isExam && (
