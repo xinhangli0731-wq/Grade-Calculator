@@ -1,0 +1,6 @@
+{
+  "name": "Course Grade Planner",
+  "description": "AI-powered syllabus parser and interactive course grade calculator that shows the exact exam scores needed to achieve your target letter grade.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
