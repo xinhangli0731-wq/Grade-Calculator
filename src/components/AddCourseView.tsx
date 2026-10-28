@@ -2,6 +2,10 @@ import React, { useState, useRef, useEffect } from 'react';
 import { Upload, ArrowLeft, Loader2, AlertCircle, FileCheck, X } from 'lucide-react';
 import { ParsedSyllabusResponse } from '../types/course';
 import { SAMPLE_SYLLABI, SampleSyllabusPreset } from '../data/initialCourses';
+import {
+  extractTextFromFileOnClient,
+  parseSyllabusOnClientFallback,
+} from '../utils/clientSyllabusParser';
 
 interface AddCourseViewProps {
   onBack: () => void;
@@ -160,29 +164,53 @@ export const AddCourseView: React.FC<AddCourseViewProps> = ({
         rawText?: string;
       } = {};
 
+      let clientExtractedText = pastedText.trim();
+
       if (selectedFile) {
-        const optimized = await fileToOptimizedBase64(selectedFile);
         payload.fileName = selectedFile.name;
-        payload.mimeType = optimized.mimeType;
-        payload.base64Data = optimized.base64;
+        const extractedFromDoc = await extractTextFromFileOnClient(selectedFile);
+        if (extractedFromDoc && extractedFromDoc.length >= 30) {
+          clientExtractedText = clientExtractedText
+            ? `${clientExtractedText}\n\n${extractedFromDoc}`
+            : extractedFromDoc;
+        } else {
+          const optimized = await fileToOptimizedBase64(selectedFile);
+          payload.mimeType = optimized.mimeType;
+          payload.base64Data = optimized.base64;
+        }
       }
 
-      if (pastedText.trim()) {
-        payload.rawText = pastedText.trim();
+      if (clientExtractedText) {
+        payload.rawText = clientExtractedText;
       }
 
-      const response = await fetch('/api/parse-syllabus', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+      // 1. Try Backend API (/api/parse-syllabus)
+      try {
+        const response = await fetch('/api/parse-syllabus', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+        });
+
+        const contentType = response.headers.get('content-type') || '';
+        if (response.ok && contentType.includes('application/json')) {
+          const data = (await response.json()) as ParsedSyllabusResponse;
+          onParsedSuccess(data);
+          return;
+        }
+      } catch {
+        // Backend route unreachable (e.g. static deployment); fall through to client parser
+      }
+
+      // 2. Fallback: Client-side Gemini or Smart Syllabus Parser (works on any static host)
+      const fallbackResult = await parseSyllabusOnClientFallback({
+        fileName: payload.fileName,
+        mimeType: payload.mimeType,
+        base64Data: payload.base64Data,
+        extractedText: clientExtractedText,
       });
 
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to read syllabus.');
-      }
-
-      onParsedSuccess(data as ParsedSyllabusResponse);
+      onParsedSuccess(fallbackResult);
     } catch (err: unknown) {
       setErrorMsg(
         err instanceof Error ? err.message : 'Unable to parse syllabus. Please try again.'
@@ -192,26 +220,9 @@ export const AddCourseView: React.FC<AddCourseViewProps> = ({
     }
   };
 
-  const handleSampleClick = async (preset: SampleSyllabusPreset) => {
+  const handleSampleClick = (preset: SampleSyllabusPreset) => {
     setErrorMsg(null);
-    setIsParsing(true);
-    try {
-      const response = await fetch('/api/parse-syllabus', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rawText: preset.rawText }),
-      });
-      if (response.ok) {
-        const data = (await response.json()) as ParsedSyllabusResponse;
-        onParsedSuccess(data);
-      } else {
-        onParsedSuccess(preset.fallbackParsed);
-      }
-    } catch {
-      onParsedSuccess(preset.fallbackParsed);
-    } finally {
-      setIsParsing(false);
-    }
+    onParsedSuccess(preset.fallbackParsed);
   };
 
   return (
