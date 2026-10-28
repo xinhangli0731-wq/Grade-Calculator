@@ -45,7 +45,7 @@ async function fileToOptimizedBase64(
   if (isImage) {
     try {
       const bitmap = await createImageBitmap(file);
-      const maxDim = 1280;
+      const maxDim = 1800;
       let width = bitmap.width;
       let height = bitmap.height;
       if (width > maxDim || height > maxDim) {
@@ -61,7 +61,7 @@ async function fileToOptimizedBase64(
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
         ctx.drawImage(bitmap, 0, 0, width, height);
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.78);
+        const dataUrl = canvas.toDataURL('image/jpeg', 0.88);
         return {
           base64: dataUrl.split(',')[1],
           mimeType: 'image/jpeg',
@@ -79,7 +79,7 @@ async function fileToOptimizedBase64(
       const base64 = result.includes(',') ? result.split(',')[1] : result;
       resolve({
         base64,
-        mimeType: file.type || 'application/octet-stream',
+        mimeType: file.type || 'image/jpeg',
       });
     };
     reader.onerror = (err) => reject(err);

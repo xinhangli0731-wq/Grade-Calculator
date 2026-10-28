@@ -8,7 +8,45 @@ import {
   normalizeAndExpandParsedSyllabus,
 } from './normalizeSyllabus';
 
-declare const process: { env: { GEMINI_API_KEY?: string } };
+declare const process: { env: { GEMINI_API_KEY?: string; API_KEY?: string } };
+
+function detectMimeFromBase64(cleanBase64: string, fallbackMime?: string): string {
+  const head = cleanBase64.slice(0, 16);
+  if (head.startsWith('/9j/')) return 'image/jpeg';
+  if (head.startsWith('iVBOR')) return 'image/png';
+  if (head.startsWith('UklGR')) return 'image/webp';
+  if (head.startsWith('R0lGOD')) return 'image/gif';
+  if (head.startsWith('JVBERi')) return 'application/pdf';
+  if (fallbackMime && fallbackMime !== 'application/octet-stream') {
+    return fallbackMime;
+  }
+  return 'image/jpeg';
+}
+
+function parseJsonResponseText(rawText?: string): Record<string, unknown> | null {
+  if (!rawText) return null;
+  const trimmed = rawText.trim();
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    const fenced = trimmed
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+    try {
+      return JSON.parse(fenced) as Record<string, unknown>;
+    } catch {
+      const firstBrace = fenced.indexOf('{');
+      const lastBrace = fenced.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        return JSON.parse(
+          fenced.slice(firstBrace, lastBrace + 1)
+        ) as Record<string, unknown>;
+      }
+    }
+  }
+  return null;
+}
 
 const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with this exact structure:
 {
@@ -190,12 +228,19 @@ export function smartParseSyllabusText(
     // Stop adding if we already reached 100% and no exam drop policy is active
     if (!hasExamDrop && runningWeightSum >= 99.5) break;
 
-    const compMatch = line.match(
-      /^[-*•]?\s*([A-Za-z0-9\s&/()+#-]{2,45}?)\s*(?:[:=\-–—]|\()\s*(\d{1,3}(?:\.\d+)?)\s*%\)?/
-    );
+    const compMatch =
+      line.match(
+        /^[-*•]?\s*([A-Za-z][A-Za-z0-9\s&/()+#-]{1,45}?)\s*(?:[:=\-–—(]|\s+)\s*\+?(\d{1,3}(?:\.\d+)?)\s*%\)?/
+      ) ||
+      line.match(
+        /^[-*•]?\s*\+?(\d{1,3}(?:\.\d+)?)\s*%\s*(?:[:=\-–—]|for|of)?\s*([A-Za-z][A-Za-z0-9\s&/()+#-]{1,45})$/i
+      );
     if (compMatch) {
-      const rawName = compMatch[1].replace(/\(\s*$/, '').trim();
-      const weight = parseFloat(compMatch[2]);
+      const isPctFirst = /^\d/.test(compMatch[1]);
+      const rawName = (isPctFirst ? compMatch[2] : compMatch[1])
+        .replace(/\(\s*$/, '')
+        .trim();
+      const weight = parseFloat(isPctFirst ? compMatch[1] : compMatch[2]);
       const baseKey = normalizeComponentBaseKey(rawName);
 
       if (
@@ -314,8 +359,36 @@ export function smartParseSyllabusText(
 }
 
 /**
+ * Extracts text from images on the client via Tesseract.js OCR if Gemini API is unavailable
+ */
+async function extractTextFromImagesViaOcr(
+  files: Array<{ fileName?: string; mimeType?: string; base64Data: string }>
+): Promise<string> {
+  const ocrTexts: string[] = [];
+  try {
+    const Tesseract = await import('tesseract.js');
+    for (const item of files) {
+      if (!item.base64Data) continue;
+      const cleanBase64 = item.base64Data.includes(',')
+        ? item.base64Data.split(',')[1].trim()
+        : item.base64Data.trim();
+      const mime = detectMimeFromBase64(cleanBase64, item.mimeType);
+      if (!mime.startsWith('image/')) continue;
+      const dataUrl = `data:${mime};base64,${cleanBase64}`;
+      const result = await Tesseract.recognize(dataUrl, 'eng');
+      if (result?.data?.text) {
+        ocrTexts.push(result.data.text.trim());
+      }
+    }
+  } catch (err) {
+    console.warn('Client OCR warning:', err);
+  }
+  return ocrTexts.join('\n\n');
+}
+
+/**
  * Client-side parser using Gemini AI (statically injected key at build time)
- * with fallback to smartParseSyllabusText
+ * with fallback to client-side OCR + smartParseSyllabusText
  */
 export async function parseSyllabusOnClientFallback(params: {
   fileName?: string;
@@ -330,20 +403,44 @@ export async function parseSyllabusOnClientFallback(params: {
 }): Promise<ParsedSyllabusResponse> {
   const { fileName, mimeType, base64Data, files, extractedText } = params;
 
-  // Direct reference to process.env.GEMINI_API_KEY so Vite's `define` replaces it in production builds
   const apiKey =
-    process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY || '';
+    process.env.GEMINI_API_KEY ||
+    process.env.API_KEY ||
+    import.meta.env.VITE_GEMINI_API_KEY ||
+    '';
+
+  const normalizedFiles: Array<{
+    fileName?: string;
+    mimeType: string;
+    base64Data: string;
+  }> = [];
+
+  if (Array.isArray(files) && files.length > 0) {
+    for (const item of files) {
+      if (!item.base64Data) continue;
+      const cleanBase64 = item.base64Data.includes(',')
+        ? item.base64Data.split(',')[1].trim()
+        : item.base64Data.trim();
+      normalizedFiles.push({
+        fileName: item.fileName,
+        mimeType: detectMimeFromBase64(cleanBase64, item.mimeType),
+        base64Data: cleanBase64,
+      });
+    }
+  } else if (base64Data) {
+    const cleanBase64 = base64Data.includes(',')
+      ? base64Data.split(',')[1].trim()
+      : base64Data.trim();
+    normalizedFiles.push({
+      fileName,
+      mimeType: detectMimeFromBase64(cleanBase64, mimeType),
+      base64Data: cleanBase64,
+    });
+  }
 
   if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
     try {
-      const ai = new GoogleGenAI({
-        apiKey,
-        httpOptions: {
-          headers: {
-            'User-Agent': 'aistudio-build',
-          },
-        },
-      });
+      const ai = new GoogleGenAI({ apiKey });
       const parts: Array<
         { text: string } | { inlineData: { mimeType: string; data: string } }
       > = [];
@@ -357,53 +454,70 @@ export async function parseSyllabusOnClientFallback(params: {
         });
       }
 
-      if (Array.isArray(files) && files.length > 0) {
-        for (const item of files) {
-          if (item.base64Data) {
-            parts.push({
-              inlineData: {
-                mimeType: item.mimeType || 'image/jpeg',
-                data: item.base64Data,
-              },
-            });
-          }
-        }
-      } else if (base64Data && mimeType) {
+      for (const item of normalizedFiles) {
         parts.push({
           inlineData: {
-            mimeType,
-            data: base64Data,
+            mimeType: item.mimeType,
+            data: item.base64Data,
           },
         });
       }
 
       if (parts.length > 0) {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.1-flash-lite',
-          contents: { parts },
-          config: {
-            systemInstruction: SYSTEM_PROMPT,
-            responseMimeType: 'application/json',
-            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-          },
-        });
-        const rawJson = response.text?.trim();
-        if (rawJson) {
-          const parsed = normalizeAndExpandParsedSyllabus(
-            JSON.parse(rawJson) as Record<string, unknown>
-          );
-          if (!parsed.courseCode) {
-            parsed.courseCode = cleanCourseCodeFromFileName(fileName);
+        const modelAttempts: Array<{
+          model: string;
+          thinkingLevel?: ThinkingLevel;
+        }> = [
+          { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+          { model: 'gemini-3.1-flash-lite' },
+          { model: 'gemini-2.5-flash' },
+          { model: 'gemini-3.8-flash', thinkingLevel: ThinkingLevel.LOW },
+        ];
+
+        for (const attempt of modelAttempts) {
+          try {
+            const response = await ai.models.generateContent({
+              model: attempt.model,
+              contents: { parts },
+              config: {
+                systemInstruction: SYSTEM_PROMPT,
+                responseMimeType: 'application/json',
+                ...(attempt.thinkingLevel
+                  ? { thinkingConfig: { thinkingLevel: attempt.thinkingLevel } }
+                  : {}),
+              },
+            });
+            const parsedObj = parseJsonResponseText(response.text);
+            if (
+              parsedObj &&
+              Array.isArray(parsedObj.components) &&
+              parsedObj.components.length > 0
+            ) {
+              const parsed = normalizeAndExpandParsedSyllabus(parsedObj);
+              if (!parsed.courseCode) {
+                parsed.courseCode = cleanCourseCodeFromFileName(fileName);
+              }
+              return parsed;
+            }
+          } catch {
+            // Try next model in fallback chain
           }
-          return parsed;
         }
       }
     } catch (err) {
-      console.warn('Client Gemini call failed, using smart text parser:', err);
+      console.warn('Client Gemini call failed, falling back to OCR/text parser:', err);
+    }
+  }
+
+  let combinedText = (extractedText || '').trim();
+  if (normalizedFiles.some((f) => f.mimeType.startsWith('image/'))) {
+    const ocrText = await extractTextFromImagesViaOcr(normalizedFiles);
+    if (ocrText) {
+      combinedText = combinedText ? `${combinedText}\n\n${ocrText}` : ocrText;
     }
   }
 
   return normalizeAndExpandParsedSyllabus(
-    smartParseSyllabusText(extractedText || '', fileName)
+    smartParseSyllabusText(combinedText, fileName)
   );
 }

@@ -1,9 +1,9 @@
 import 'dotenv/config';
 import express from 'express';
+import fs from 'fs';
 import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import mammoth from 'mammoth';
 import { extractText } from 'unpdf';
@@ -11,16 +11,39 @@ import { extractText } from 'unpdf';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
+function getServerGenAI(): GoogleGenAI {
+  const apiKey =
+    process.env.GEMINI_API_KEY ||
+    process.env.API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    '';
+  return new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
+      },
     },
-  },
-});
+  });
+}
 
-function inferMimeType(fileName?: string, rawMime?: string): string {
+function inferMimeType(
+  fileName?: string,
+  rawMime?: string,
+  cleanBase64?: string
+): string {
+  if (cleanBase64) {
+    const head = cleanBase64.slice(0, 16);
+    if (head.startsWith('/9j/')) return 'image/jpeg';
+    if (head.startsWith('iVBOR')) return 'image/png';
+    if (head.startsWith('UklGR')) return 'image/webp';
+    if (head.startsWith('R0lGOD')) return 'image/gif';
+    if (head.startsWith('JVBERi')) return 'application/pdf';
+  }
+  if (rawMime && rawMime !== 'application/octet-stream') {
+    return rawMime;
+  }
   const lower = (fileName || '').toLowerCase().trim();
   if (lower.endsWith('.pdf')) return 'application/pdf';
   if (lower.endsWith('.png')) return 'image/png';
@@ -36,10 +59,32 @@ function inferMimeType(fileName?: string, rawMime?: string): string {
   if (lower.endsWith('.txt') || lower.endsWith('.md') || lower.endsWith('.csv')) {
     return 'text/plain';
   }
-  if (rawMime && rawMime !== 'application/octet-stream') {
-    return rawMime;
+  return 'image/jpeg';
+}
+
+function parseJsonResponseText(rawText?: string): Record<string, unknown> | null {
+  if (!rawText) return null;
+  const trimmed = rawText.trim();
+  try {
+    return JSON.parse(trimmed) as Record<string, unknown>;
+  } catch {
+    const fenced = trimmed
+      .replace(/^```(?:json)?\s*/i, '')
+      .replace(/\s*```$/i, '')
+      .trim();
+    try {
+      return JSON.parse(fenced) as Record<string, unknown>;
+    } catch {
+      const firstBrace = fenced.indexOf('{');
+      const lastBrace = fenced.lastIndexOf('}');
+      if (firstBrace !== -1 && lastBrace > firstBrace) {
+        return JSON.parse(
+          fenced.slice(firstBrace, lastBrace + 1)
+        ) as Record<string, unknown>;
+      }
+    }
   }
-  return 'application/pdf';
+  return null;
 }
 
 function heuristicParseSyllabusText(text: string, fileName?: string) {
@@ -84,11 +129,23 @@ function heuristicParseSyllabusText(text: string, fileName?: string) {
     }
     if (matchedCutoffOnLine) continue;
 
-    const compMatch = line.match(/^[-*•]?\s*([A-Za-z0-9\s&/()+#-]{2,45}?)\s*[:=\-–—(]\s*\+?(\d{1,3}(?:\.\d+)?)\s*%/);
+    const compMatch =
+      line.match(
+        /^[-*•]?\s*([A-Za-z][A-Za-z0-9\s&/()+#-]{1,45}?)\s*(?:[:=\-–—(]|\s+)\s*\+?(\d{1,3}(?:\.\d+)?)\s*%\)?/
+      ) ||
+      line.match(
+        /^[-*•]?\s*\+?(\d{1,3}(?:\.\d+)?)\s*%\s*(?:[:=\-–—]|for|of)?\s*([A-Za-z][A-Za-z0-9\s&/()+#-]{1,45})$/i
+      );
     if (compMatch) {
-      const rawName = compMatch[1].trim();
-      const weight = parseFloat(compMatch[2]);
-      if (weight > 0 && weight <= 100 && !gradeLetters.has(rawName.toUpperCase())) {
+      const isPctFirst = /^\d/.test(compMatch[1]);
+      const rawName = (isPctFirst ? compMatch[2] : compMatch[1]).trim();
+      const weight = parseFloat(isPctFirst ? compMatch[1] : compMatch[2]);
+      if (
+        weight > 0 &&
+        weight <= 100 &&
+        !gradeLetters.has(rawName.toUpperCase()) &&
+        !/^(total|overall|minimum|cutoff|grade|scale|score)/i.test(rawName)
+      ) {
         const lower = rawName.toLowerCase();
         const isExtraCredit =
           lower.includes('extra credit') ||
@@ -702,9 +759,13 @@ async function startServer() {
       for (const fileItem of incomingFiles) {
         if (!fileItem.base64Data) continue;
         const cleanBase64 = fileItem.base64Data.includes(',')
-          ? fileItem.base64Data.split(',')[1]
-          : fileItem.base64Data;
-        const resolvedMime = inferMimeType(fileItem.fileName, fileItem.mimeType);
+          ? fileItem.base64Data.split(',')[1].trim()
+          : fileItem.base64Data.trim();
+        const resolvedMime = inferMimeType(
+          fileItem.fileName,
+          fileItem.mimeType,
+          cleanBase64
+        );
         const lowerName = (fileItem.fileName || '').toLowerCase();
 
         const isPdf = resolvedMime === 'application/pdf' || lowerName.endsWith('.pdf');
@@ -775,41 +836,39 @@ async function startServer() {
         return;
       }
 
+      const ai = getServerGenAI();
       let parsed: Record<string, unknown> | null = null;
       let lastError: unknown = null;
 
-      try {
-        const response = await ai.models.generateContent({
-          model: 'gemini-3.1-flash-lite',
-          contents: { parts },
-          config: {
-            systemInstruction: SYSTEM_PROMPT,
-            responseMimeType: 'application/json',
-            thinkingConfig: { thinkingLevel: ThinkingLevel.MINIMAL },
-          },
-        });
-        const rawJson = response.text?.trim();
-        if (rawJson) {
-          parsed = JSON.parse(rawJson);
-        }
-      } catch (err) {
-        lastError = err;
+      const modelAttempts: Array<{
+        model: string;
+        thinkingLevel?: ThinkingLevel;
+      }> = [
+        { model: 'gemini-3.1-flash-lite', thinkingLevel: ThinkingLevel.MINIMAL },
+        { model: 'gemini-3.1-flash-lite' },
+        { model: 'gemini-2.5-flash' },
+        { model: 'gemini-3.8-flash', thinkingLevel: ThinkingLevel.LOW },
+      ];
+
+      for (const attempt of modelAttempts) {
         try {
-          const response2 = await ai.models.generateContent({
-            model: 'gemini-3.8-flash',
+          const response = await ai.models.generateContent({
+            model: attempt.model,
             contents: { parts },
             config: {
               systemInstruction: SYSTEM_PROMPT,
               responseMimeType: 'application/json',
-              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              ...(attempt.thinkingLevel
+                ? { thinkingConfig: { thinkingLevel: attempt.thinkingLevel } }
+                : {}),
             },
           });
-          const rawJson2 = response2.text?.trim();
-          if (rawJson2) {
-            parsed = JSON.parse(rawJson2);
+          parsed = parseJsonResponseText(response.text);
+          if (parsed && Array.isArray(parsed.components) && parsed.components.length > 0) {
+            break;
           }
-        } catch (err2) {
-          lastError = err2;
+        } catch (err) {
+          lastError = err;
         }
       }
 
@@ -838,21 +897,24 @@ async function startServer() {
     }
   });
 
+  const distPath = path.join(__dirname, 'dist');
+  const distIndex = path.join(distPath, 'index.html');
   const isProd =
     process.env.NODE_ENV === 'production' ||
-    process.env.npm_lifecycle_event === 'start';
+    process.env.npm_lifecycle_event === 'start' ||
+    (process.env.npm_lifecycle_event !== 'dev' && fs.existsSync(distIndex));
 
   if (!isProd) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      res.sendFile(distIndex);
     });
   }
 
