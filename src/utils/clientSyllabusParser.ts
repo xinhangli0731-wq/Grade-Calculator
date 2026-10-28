@@ -3,15 +3,17 @@ import mammoth from 'mammoth';
 import { extractText } from 'unpdf';
 import { ParsedSyllabusResponse } from '../types/course';
 
+declare const process: { env: { GEMINI_API_KEY?: string } };
+
 const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with this exact structure:
 {
-  "courseCode": "string (e.g. 'STAT 400', or '' if not visible; NEVER 'Unknown')",
+  "courseCode": "string (e.g. 'STAT 400', 'STAT 385', or '' if not visible; NEVER 'Unknown')",
   "courseTitle": "string",
   "examDropCount": 0,
   "policyNotes": "string (brief summary of exam/homework drop policy if any)",
   "components": [
     {
-      "name": "string (exact name e.g. 'Homework', 'Midterm 1', 'Midterm 2', 'Midterm 3', 'Final Exam')",
+      "name": "string (exact name e.g. 'Homework', 'Midterm 1', 'Midterm 2', 'Final Exam')",
       "weight": 20,
       "categoryType": "exam | non-exam",
       "maxPoints": 100,
@@ -27,10 +29,13 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
   ]
 }
 Rules:
-1. Expand multi-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%).
-2. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
-3. Homework/Labs/Participation -> categoryType: "non-exam". Exams/Midterms/Finals/Quizzes -> categoryType: "exam".
-4. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
+1. NEVER duplicate components: if a syllabus lists grading components in a summary list/table and repeats them in detailed sections below, include each component ONLY ONCE so regular weights sum to 100%.
+2. Expand multi-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%).
+3. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
+4. Category types:
+   - Regular ongoing coursework like Homework, Classwork, Practice Problems, Challenge Problems, Labs, Attendance, Participation, Worksheets, Discussions -> categoryType: "non-exam". If it says e.g. "(best 5/6)" or "8 homeworks, drop lowest 1", set totalSubItemsCount = 6 (or 8) and subDropLowestCount = 1.
+   - Major assessments like Midterm, Final Exam, Exams, Quizzes, Midterm Report, Final Project -> categoryType: "exam".
+5. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
 
 /**
  * Extracts text in the browser from .docx, .pdf, .txt, .html, .md, .csv files
@@ -76,7 +81,6 @@ export async function extractTextFromFileOnClient(file: File): Promise<string> {
 
 function cleanCourseCodeFromFileName(fileName?: string): string {
   if (!fileName) return '';
-  // Normalize separators like '+' or '_' or '-' into spaces (e.g. "Stat+400+Syllabus.docx" -> "Stat 400 Syllabus")
   const normalized = fileName.replace(/[+_.-]+/g, ' ');
   const match = normalized.match(/\b([A-Za-z]{2,5})\s*(\d{3}[A-Za-z]?)\b/);
   if (match) {
@@ -88,9 +92,50 @@ function cleanCourseCodeFromFileName(fileName?: string): string {
   return '';
 }
 
+function normalizeComponentBaseKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/\(.*?\)/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+export function inferComponentCategory(name: string): 'exam' | 'non-exam' {
+  const lower = name.toLowerCase();
+  if (
+    lower.includes('midterm') ||
+    lower.includes('final') ||
+    lower.includes('exam') ||
+    lower.includes('quiz') ||
+    lower.includes('test') ||
+    lower.includes('report')
+  ) {
+    return 'exam';
+  }
+  if (
+    lower.includes('homework') ||
+    lower.includes('hw') ||
+    lower.includes('classwork') ||
+    lower.includes('practice') ||
+    lower.includes('challenge') ||
+    lower.includes('problem') ||
+    lower.includes('worksheet') ||
+    lower.includes('attendance') ||
+    lower.includes('participation') ||
+    lower.includes('assignment') ||
+    lower.includes('lab') ||
+    lower.includes('discussion') ||
+    lower.includes('project') ||
+    lower.includes('mp')
+  ) {
+    return 'non-exam';
+  }
+  return 'exam';
+}
+
 /**
  * Smart deterministic parser for extracted syllabus text (.docx / .pdf / pasted text)
- * Used when deployed to static hosts without a backend API or when offline
+ * Used only as final fallback if both backend API and client Gemini SDK are unreachable
  */
 export function smartParseSyllabusText(
   text: string,
@@ -99,7 +144,6 @@ export function smartParseSyllabusText(
   const normalizedText = text.replace(/\r\n/g, '\n');
   const lowerFull = normalizedText.toLowerCase();
 
-  // 1. Detect Course Code from text or filename (e.g. "Stat+400+Syllabus.docx" -> "STAT 400")
   const codeFromText = normalizedText.match(
     /\b([A-Z]{2,5})\s?[-/]?\s?(\d{3}[A-Z]?)\b/
   );
@@ -107,7 +151,6 @@ export function smartParseSyllabusText(
     ? `${codeFromText[1].toUpperCase()} ${codeFromText[2].toUpperCase()}`
     : cleanCourseCodeFromFileName(fileName);
 
-  // 2. Detect Exam Drop Policy & Homework Drop Policy
   const hasExamDrop =
     /drop\s+(the\s+)?lowest\s+(1\s+|one\s+)?(exam|midterm|test)/i.test(lowerFull) ||
     /lowest\s+(exam|midterm|test)\s+(score\s+)?(is\s+|will\s+be\s+)?dropped/i.test(
@@ -128,7 +171,6 @@ export function smartParseSyllabusText(
       lowerFull
     );
 
-  // 3. Extract Grade Cutoffs
   const gradeScale: Array<{ letter: string; minPercentage: number }> = [];
   const gradeLetters = new Set([
     'A+',
@@ -158,42 +200,51 @@ export function smartParseSyllabusText(
     }
   }
 
-  // 4. Extract Grading Components
   const components: ParsedSyllabusResponse['components'] = [];
+  const seenBaseKeys = new Set<string>();
+  let runningWeightSum = 0;
+
   const lines = normalizedText
     .split('\n')
     .map((l) => l.trim())
     .filter(Boolean);
 
   for (const line of lines) {
-    // Skip lines that look purely like grade cutoff listings
     if (/\bA\+\b.*\bA\b.*\bB\+\b/i.test(line)) continue;
+    // Stop adding if we already reached 100% and no exam drop policy is active
+    if (!hasExamDrop && runningWeightSum >= 99.5) break;
 
-    // Pattern A: "Homework: 10%" or "Midterm 1 - 20%" or "Homework (10%)"
     const compMatch = line.match(
       /^[-*•]?\s*([A-Za-z0-9\s&/()+#-]{2,45}?)\s*(?:[:=\-–—]|\()\s*(\d{1,3}(?:\.\d+)?)\s*%\)?/
     );
     if (compMatch) {
       const rawName = compMatch[1].replace(/\(\s*$/, '').trim();
       const weight = parseFloat(compMatch[2]);
+      const baseKey = normalizeComponentBaseKey(rawName);
+
       if (
         weight > 0 &&
         weight <= 100 &&
+        baseKey.length >= 2 &&
+        !seenBaseKeys.has(baseKey) &&
         !gradeLetters.has(rawName.toUpperCase()) &&
         !/^(total|overall|minimum|cutoff|grade|scale|score)/i.test(rawName)
       ) {
-        const lower = rawName.toLowerCase();
-        const isNonExam =
-          lower.includes('homework') ||
-          lower.includes('hw') ||
-          lower.includes('attendance') ||
-          lower.includes('participation') ||
-          lower.includes('assignment') ||
-          lower.includes('lab') ||
-          lower.includes('project') ||
-          lower.includes('discussion');
+        const catType = inferComponentCategory(rawName);
+        const isNonExam = catType === 'non-exam';
 
-        // Check if multi-exam line like "3 Midterms: 60%" or "Midterms (3): 60%"
+        // Parse "(best 5/6)" or "best K of N"
+        const bestMatch =
+          rawName.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i) ||
+          line.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i);
+        const subTotal = bestMatch ? parseInt(bestMatch[2], 10) : isNonExam ? 8 : 1;
+        const subDrop = bestMatch
+          ? Math.max(0, parseInt(bestMatch[2], 10) - parseInt(bestMatch[1], 10))
+          : isNonExam && hasHwDrop
+          ? 1
+          : 0;
+
+        const lower = rawName.toLowerCase();
         const multiExamMatch =
           !isNonExam &&
           (rawName.match(/^(\d+)\s+(midterm|exam|quiz|test)s?/i) ||
@@ -225,87 +276,26 @@ export function smartParseSyllabusText(
                 maxPoints: 100,
                 canBeDropped: hasExamDrop,
               });
+              runningWeightSum += eachWeight;
             }
+            seenBaseKeys.add(baseKey);
             continue;
           }
         }
 
+        seenBaseKeys.add(baseKey);
+        runningWeightSum += weight;
         components.push({
           name: rawName,
           weight,
-          categoryType: isNonExam ? 'non-exam' : 'exam',
+          categoryType: catType,
           maxPoints: 100,
           canBeDropped: !isNonExam && hasExamDrop,
-          totalSubItemsCount: isNonExam ? 8 : 1,
-          subDropLowestCount: isNonExam && hasHwDrop ? 1 : 0,
+          totalSubItemsCount: subTotal,
+          subDropLowestCount: subDrop,
         });
       }
     }
-  }
-
-  // Check if STAT 400 or similar pattern in prose if line-by-line didn't catch all exams
-  if (
-    courseCode.replace(/\s+/g, '') === 'STAT400' &&
-    components.filter((c) => c.categoryType === 'exam').length <= 1
-  ) {
-    return {
-      courseCode: 'STAT 400',
-      courseTitle: 'Statistics and Probability I',
-      examDropCount: 1,
-      policyNotes:
-        '4 exams total (3 Midterms + Final Exam); lowest 1 exam is dropped so best 3 exams count for 90% (30% each). Lowest homework dropped.',
-      components: [
-        {
-          name: 'Homework',
-          weight: 10,
-          categoryType: 'non-exam',
-          maxPoints: 100,
-          canBeDropped: false,
-          totalSubItemsCount: 10,
-          subDropLowestCount: 1,
-        },
-        {
-          name: 'Midterm 1',
-          weight: 30,
-          categoryType: 'exam',
-          maxPoints: 100,
-          canBeDropped: true,
-        },
-        {
-          name: 'Midterm 2',
-          weight: 30,
-          categoryType: 'exam',
-          maxPoints: 100,
-          canBeDropped: true,
-        },
-        {
-          name: 'Midterm 3',
-          weight: 30,
-          categoryType: 'exam',
-          maxPoints: 100,
-          canBeDropped: true,
-        },
-        {
-          name: 'Final Exam',
-          weight: 30,
-          categoryType: 'exam',
-          maxPoints: 100,
-          canBeDropped: true,
-        },
-      ],
-      gradeScaleFound: true,
-      gradeScale:
-        gradeScale.length >= 4
-          ? gradeScale.sort((a, b) => b.minPercentage - a.minPercentage)
-          : [
-              { letter: 'A+', minPercentage: 97 },
-              { letter: 'A', minPercentage: 93 },
-              { letter: 'A-', minPercentage: 90 },
-              { letter: 'B+', minPercentage: 87 },
-              { letter: 'B', minPercentage: 83 },
-              { letter: 'B-', minPercentage: 80 },
-            ],
-    };
   }
 
   if (components.length === 0) {
@@ -356,7 +346,8 @@ export function smartParseSyllabusText(
 }
 
 /**
- * Fallback client-side parser when /api/parse-syllabus is unreachable (e.g. static deployment)
+ * Client-side parser using Gemini AI (statically injected key at build time)
+ * with fallback to smartParseSyllabusText
  */
 export async function parseSyllabusOnClientFallback(params: {
   fileName?: string;
@@ -371,15 +362,20 @@ export async function parseSyllabusOnClientFallback(params: {
 }): Promise<ParsedSyllabusResponse> {
   const { fileName, mimeType, base64Data, files, extractedText } = params;
 
-  // 1. Try client-side Gemini SDK if API key was injected at build time
+  // Direct reference to process.env.GEMINI_API_KEY so Vite's `define` replaces it in production builds
   const apiKey =
-    (typeof process !== 'undefined' && process.env?.GEMINI_API_KEY) ||
-    import.meta.env.VITE_GEMINI_API_KEY ||
-    '';
+    process.env.GEMINI_API_KEY || import.meta.env.VITE_GEMINI_API_KEY || '';
 
   if (apiKey && apiKey !== 'MY_GEMINI_API_KEY') {
     try {
-      const ai = new GoogleGenAI({ apiKey });
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
       const parts: Array<
         { text: string } | { inlineData: { mimeType: string; data: string } }
       > = [];
@@ -442,6 +438,5 @@ export async function parseSyllabusOnClientFallback(params: {
     }
   }
 
-  // 2. Use deterministic smart syllabus parser on extracted text or filename
   return smartParseSyllabusText(extractedText || '', fileName);
 }

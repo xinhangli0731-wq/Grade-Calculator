@@ -135,13 +135,13 @@ function heuristicParseSyllabusText(text: string, fileName?: string) {
 
 const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with this exact structure:
 {
-  "courseCode": "string (e.g. 'STAT 400', or '' if not visible; NEVER 'Unknown')",
+  "courseCode": "string (e.g. 'STAT 400', 'STAT 385', or '' if not visible; NEVER 'Unknown')",
   "courseTitle": "string",
   "examDropCount": 0,
   "policyNotes": "string (brief summary of exam/homework drop policy and extra credit policy if any)",
   "components": [
     {
-      "name": "string (exact name e.g. 'Homework', 'Midterm 1', 'Midterm 2', 'Midterm 3', 'Final Exam', 'Extra Credit')",
+      "name": "string (exact name e.g. 'Homework', 'Midterm 1', 'Midterm 2', 'Final Exam')",
       "weight": 20,
       "categoryType": "exam | non-exam",
       "maxPoints": 100,
@@ -158,15 +158,17 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
   ]
 }
 Rules:
-1. Expand multi-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%).
-2. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
-3. Extra Credit / Bonus: If syllabus mentions any Extra Credit or Bonus (e.g. "Extra Credit: up to 2%", "Course Evaluation Bonus: 1%", "Bonus Quizzes: 3%"), include it in components with "isExtraCredit": true, "categoryType": "non-exam", "canBeDropped": false, and "weight" equal to its maximum bonus percentage. Regular components must have "isExtraCredit": false.
-4. Homework/Labs/Participation -> categoryType: "non-exam". Exams/Midterms/Finals/Quizzes -> categoryType: "exam".
+1. NEVER duplicate components: if a syllabus lists grading components in a summary list/table and repeats them in detailed sections below, include each component ONLY ONCE so regular weights sum to 100%.
+2. Expand multi-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%).
+3. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
+4. Category types:
+   - Regular ongoing coursework like Homework, Classwork, Practice Problems, Challenge Problems, Labs, Attendance, Participation, Worksheets, Discussions -> categoryType: "non-exam". If it says e.g. "(best 5/6)" or "8 homeworks, drop lowest 1", set totalSubItemsCount = 6 (or 8) and subDropLowestCount = 1.
+   - Major assessments like Midterm, Final Exam, Exams, Quizzes, Midterm Report, Final Project -> categoryType: "exam".
 5. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
 
 async function startServer() {
   const app = express();
-  const PORT = Number(process.env.PORT) || 3000;
+  const PORT = 3000;
 
   app.use(express.json({ limit: '50mb' }));
 

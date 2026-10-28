@@ -29,12 +29,28 @@ const STANDARD_SCALE_PRESET: GradeCutoff[] = [
 function inferCategoryType(name: string): 'exam' | 'non-exam' {
   const lower = name.toLowerCase();
   if (
+    lower.includes('midterm') ||
+    lower.includes('final') ||
+    lower.includes('exam') ||
+    lower.includes('quiz') ||
+    lower.includes('test') ||
+    lower.includes('report')
+  ) {
+    return 'exam';
+  }
+  if (
     lower.includes('homework') ||
     lower.includes('hw') ||
+    lower.includes('classwork') ||
+    lower.includes('practice') ||
+    lower.includes('challenge') ||
+    lower.includes('problem') ||
+    lower.includes('worksheet') ||
     lower.includes('attendance') ||
     lower.includes('participation') ||
     lower.includes('assignment') ||
     lower.includes('lab') ||
+    lower.includes('discussion') ||
     lower.includes('project') ||
     lower.includes('mp')
   ) {
@@ -47,6 +63,9 @@ function getShortPrefix(name: string): string {
   const lower = name.toLowerCase();
   if (lower.includes('homework') || lower.includes('hw')) return 'HW';
   if (lower.includes('lab')) return 'Lab';
+  if (lower.includes('practice')) return 'Prac';
+  if (lower.includes('challenge')) return 'Chal';
+  if (lower.includes('classwork')) return 'CW';
   return 'HW';
 }
 
@@ -97,13 +116,42 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
     if (existingCourse) {
       return existingCourse.components.map((c) => ({ ...c }));
     }
-    return (initialData.components || []).map((c, idx) => {
-      const catType = c.categoryType || inferCategoryType(c.name);
+
+    // Deduplicate components if parser returned duplicate base names
+    const rawList = initialData.components || [];
+    const seenKeys = new Set<string>();
+    const dedupedList = rawList.filter((c) => {
+      const key = (c.name || '')
+        .toLowerCase()
+        .replace(/\(.*?\)/g, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+      if (!key) return false;
+      if (seenKeys.has(key)) return false;
+      seenKeys.add(key);
+      return true;
+    });
+
+    return dedupedList.map((c, idx) => {
+      const catType = inferCategoryType(c.name);
       const compId = `comp-${Date.now()}-${idx}`;
+      const bestMatch = c.name.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i);
+      const parsedTotal = bestMatch ? parseInt(bestMatch[2], 10) : undefined;
+      const parsedDrop = bestMatch
+        ? Math.max(0, parseInt(bestMatch[2], 10) - parseInt(bestMatch[1], 10))
+        : undefined;
+
       const subCount =
-        c.totalSubItemsCount && c.totalSubItemsCount > 0
+        c.totalSubItemsCount && c.totalSubItemsCount > 1
           ? c.totalSubItemsCount
+          : parsedTotal && parsedTotal > 1
+          ? parsedTotal
           : 8;
+      const subDrop =
+        c.subDropLowestCount !== undefined && c.subDropLowestCount > 0
+          ? c.subDropLowestCount
+          : parsedDrop || 0;
+
       return {
         id: compId,
         name: c.name,
@@ -117,7 +165,7 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
         assumedPercentage: 100,
         whatIfPercentage: null,
         subTargetPercentage: 95,
-        subDropLowestCount: c.subDropLowestCount || 0,
+        subDropLowestCount: subDrop,
         subItems:
           catType === 'non-exam'
             ? buildInitialSubItems(compId, c.name, subCount)
@@ -175,7 +223,7 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
 
   const handleComponentChange = (
     id: string,
-    field: 'name' | 'weight' | 'canBeDropped',
+    field: 'name' | 'weight' | 'canBeDropped' | 'categoryType',
     value: string | number | boolean
   ) => {
     setValidationError(null);
@@ -193,6 +241,18 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
             subItems:
               nextCat === 'non-exam' && (!c.subItems || c.subItems.length === 0)
                 ? buildInitialSubItems(c.id, nextName, 8)
+                : c.subItems,
+          };
+        }
+        if (field === 'categoryType') {
+          const nextCat = value === 'non-exam' ? 'non-exam' : 'exam';
+          return {
+            ...c,
+            categoryType: nextCat,
+            canBeDropped: nextCat === 'exam' ? true : false,
+            subItems:
+              nextCat === 'non-exam' && (!c.subItems || c.subItems.length === 0)
+                ? buildInitialSubItems(c.id, c.name, 8)
                 : c.subItems,
           };
         }
@@ -440,6 +500,25 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
                       %
                     </span>
                   </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleComponentChange(
+                        comp.id,
+                        'categoryType',
+                        isExam ? 'non-exam' : 'exam'
+                      )
+                    }
+                    title="Click to toggle between Exam/Major Assessment (calculate required score) and Homework/Coursework (assume 100% / track per item)"
+                    className={`px-2.5 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      isExam
+                        ? 'bg-indigo-50/70 border-indigo-200 text-indigo-700'
+                        : 'bg-emerald-50/70 border-emerald-200 text-emerald-700'
+                    }`}
+                  >
+                    {isExam ? 'Exam · 考试' : 'HW · 平时'}
+                  </button>
 
                   {examDropCount > 0 && isExam && (
                     <button
