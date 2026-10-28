@@ -23,6 +23,8 @@ import {
   parseScoreStringToPercentage,
 } from '../utils/gradeMath';
 
+import { isExplicitMajorExamName } from '../utils/normalizeSyllabus';
+
 interface CourseDetailViewProps {
   course: Course;
   onBack: () => void;
@@ -40,9 +42,30 @@ function getInitialInputText(comp: GradeComponent): string {
 
 function getShortPrefix(name: string): string {
   const lower = name.toLowerCase();
+  if (lower.includes('quiz')) return 'Quiz';
   if (lower.includes('homework') || lower.includes('hw')) return 'HW';
   if (lower.includes('lab')) return 'Lab';
-  return 'HW';
+  if (lower.includes('project') || lower.includes('mp')) return 'Proj';
+  if (lower.includes('practice')) return 'Prac';
+  if (lower.includes('challenge')) return 'Chal';
+  if (lower.includes('classwork')) return 'CW';
+  if (lower.includes('discussion')) return 'Disc';
+  if (lower.includes('worksheet')) return 'WS';
+  const cleanWord = name.trim().split(/\s+/)[0]?.replace(/[^A-Za-z]/g, '');
+  if (cleanWord && cleanWord.length >= 2 && cleanWord.length <= 6) {
+    return cleanWord;
+  }
+  return 'Item';
+}
+
+/**
+ * Every component EXCEPT explicit single-occurrence major exams (Midterm, Final, Exam 1/2/3)
+ * supports "Track Each / 按次算分" (occurrence count + drop lowest), including Quizzes!
+ */
+function canTrackByCount(comp: GradeComponent): boolean {
+  if (comp.categoryType === 'non-exam') return true;
+  if (comp.subItems && comp.subItems.length > 0) return true;
+  return !isExplicitMajorExamName(comp.name);
 }
 
 export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
@@ -160,7 +183,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
   };
 
   /**
-   * Toggle or initialize individual homework tracking (ONLY for non-exam Homework/Coursework)
+   * Toggle or initialize individual item tracking (for Quizzes, Homework, Labs, and all coursework)
    */
   const handleToggleSubTracker = (comp: GradeComponent) => {
     if (expandedSubId === comp.id) {
@@ -170,8 +193,8 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
 
     setExpandedSubId(comp.id);
 
+    const prefix = getShortPrefix(comp.name);
     if (!comp.subItems || comp.subItems.length === 0) {
-      const prefix = getShortPrefix(comp.name);
       const defaultCount = 8;
       const initialSubItems: SubAssignmentItem[] = Array.from(
         { length: defaultCount },
@@ -187,9 +210,22 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
         c.id === comp.id
           ? {
               ...c,
+              categoryType: 'non-exam' as const,
+              canBeDropped: false,
               subItems: initialSubItems,
               subTargetPercentage: c.subTargetPercentage ?? 95,
               subDropLowestCount: c.subDropLowestCount ?? 0,
+            }
+          : c
+      );
+      onUpdateCourse({ ...course, components: updated });
+    } else if (comp.categoryType !== 'non-exam') {
+      const updated = course.components.map((c) =>
+        c.id === comp.id
+          ? {
+              ...c,
+              categoryType: 'non-exam' as const,
+              canBeDropped: false,
             }
           : c
       );
@@ -198,7 +234,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
   };
 
   const handleChangeSubItemCount = (comp: GradeComponent, newCount: number) => {
-    const clamped = Math.max(1, Math.min(30, newCount));
+    const clamped = Math.max(1, Math.min(40, Math.round(newCount) || 1));
     const currentList = comp.subItems || [];
     const prefix = getShortPrefix(comp.name);
 
@@ -225,7 +261,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
       comp,
       nextList,
       comp.subTargetPercentage ?? 95,
-      comp.subDropLowestCount ?? 0
+      Math.min(comp.subDropLowestCount ?? 0, Math.max(0, clamped - 1))
     );
   };
 
@@ -566,7 +602,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
           {activeMode === 'before-semester' ? (
             <div className="divide-y divide-slate-100">
               {course.components.map((comp) => {
-                const isNonExam = comp.categoryType === 'non-exam';
+                const isNonExam = canTrackByCount(comp);
                 const effWeight = effectiveWeightMap[comp.id] ?? comp.weight;
                 return (
                   <div
@@ -607,7 +643,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
           ) : (
             <div className="divide-y divide-slate-100">
               {course.components.map((comp) => {
-                const isNonExam = comp.categoryType === 'non-exam';
+                const isNonExam = canTrackByCount(comp);
                 const isCompleted = comp.status === 'completed';
                 const actualPct = getComponentActualPercentage(comp);
                 const textVal = scoreTexts[comp.id] ?? '';
@@ -653,7 +689,7 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                             {comp.name}
                           </p>
 
-                          {/* ONLY show Track Each / 按次算分 on Homework / Non-Exam components */}
+                          {/* Show Track Each / 按次算分 on Quizzes, Homework, Labs, and all non-Midterm/Final components */}
                           {isNonExam && (
                             <button
                               type="button"
@@ -752,10 +788,10 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Expanded Multi-Homework Calculator Drawer (Only for Homework / Non-Exam) */}
+                    {/* Expanded Multi-Item Calculator Drawer (Quizzes, Homework, Labs, Coursework) */}
                     {isSubExpanded && subMetrics && (
                       <div className="mt-3 ml-0 sm:ml-6 p-4 bg-indigo-50/40 border border-indigo-100 rounded-xl space-y-4">
-                        {/* Top Controls: Total Homework Count, Drop Lowest Count, Target Average */}
+                        {/* Top Controls: Total Count, Drop Lowest Count, Target Average */}
                         <div className="flex flex-wrap items-center justify-between gap-3 text-xs">
                           <div className="flex flex-wrap items-center gap-3">
                             <div className="flex items-center gap-1.5">
@@ -775,9 +811,19 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                                 >
                                   <Minus className="w-3 h-3" />
                                 </button>
-                                <span className="px-2 font-mono font-bold text-slate-900">
-                                  {subMetrics.totalCount}
-                                </span>
+                                <input
+                                  type="number"
+                                  min={1}
+                                  max={40}
+                                  value={subMetrics.totalCount}
+                                  onChange={(e) =>
+                                    handleChangeSubItemCount(
+                                      comp,
+                                      parseInt(e.target.value, 10) || 1
+                                    )
+                                  }
+                                  className="w-12 py-0.5 text-center font-mono font-bold text-slate-900 bg-transparent focus:outline-none"
+                                />
                                 <button
                                   type="button"
                                   onClick={() =>
@@ -807,10 +853,20 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                                 }
                                 className="px-2 py-1 font-mono font-semibold bg-white border border-slate-200 rounded-md text-slate-800 cursor-pointer"
                               >
-                                <option value={0}>0 (None)</option>
-                                <option value={1}>1 (Drop 1 · 去1次)</option>
-                                <option value={2}>2 (Drop 2 · 去2次)</option>
-                                <option value={3}>3 (Drop 3 · 去3次)</option>
+                                <option value={0}>0 (None · 全部计入)</option>
+                                {Array.from(
+                                  {
+                                    length: Math.min(
+                                      6,
+                                      Math.max(3, subMetrics.totalCount - 1)
+                                    ),
+                                  },
+                                  (_, idx) => idx + 1
+                                ).map((d) => (
+                                  <option key={d} value={d}>
+                                    {d} (Drop {d} · 去最低{d}次)
+                                  </option>
+                                ))}
                               </select>
                             </div>
                           </div>

@@ -37,26 +37,39 @@ function inferCategoryType(name: string, rawCategory?: string): 'exam' | 'non-ex
 
 function getShortPrefix(name: string): string {
   const lower = name.toLowerCase();
+  if (lower.includes('quiz')) return 'Quiz';
   if (lower.includes('homework') || lower.includes('hw')) return 'HW';
   if (lower.includes('lab')) return 'Lab';
+  if (lower.includes('project') || lower.includes('mp')) return 'Proj';
   if (lower.includes('practice')) return 'Prac';
   if (lower.includes('challenge')) return 'Chal';
   if (lower.includes('classwork')) return 'CW';
-  return 'HW';
+  if (lower.includes('discussion')) return 'Disc';
+  if (lower.includes('worksheet')) return 'WS';
+  const cleanWord = name.trim().split(/\s+/)[0]?.replace(/[^A-Za-z]/g, '');
+  if (cleanWord && cleanWord.length >= 2 && cleanWord.length <= 6) {
+    return cleanWord;
+  }
+  return 'Item';
 }
 
 function buildInitialSubItems(
   compId: string,
   name: string,
-  count = 8
+  count = 8,
+  existingSubItems?: SubAssignmentItem[]
 ): SubAssignmentItem[] {
   const prefix = getShortPrefix(name);
-  return Array.from({ length: count }, (_, idx) => ({
-    id: `${compId}-sub-${idx + 1}`,
-    name: `${prefix} ${idx + 1}`,
-    scoreText: '',
-    percentage: null,
-  }));
+  const clamped = Math.max(1, Math.min(40, count));
+  return Array.from({ length: clamped }, (_, idx) => {
+    const prev = existingSubItems?.[idx];
+    return {
+      id: prev?.id || `${compId}-sub-${idx + 1}`,
+      name: `${prefix} ${idx + 1}`,
+      scoreText: prev?.scoreText ?? '',
+      percentage: prev?.percentage ?? null,
+    };
+  });
 }
 
 function sanitizeCourseCode(raw?: string): string {
@@ -95,14 +108,28 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
 
   const [components, setComponents] = useState<GradeComponent[]>(() => {
     if (existingCourse) {
-      return existingCourse.components.map((c) => ({ ...c }));
+      return existingCourse.components.map((c) => {
+        const inferredCat = inferCategoryType(c.name, c.categoryType);
+        const catType =
+          c.subItems && c.subItems.length > 0 ? 'non-exam' : inferredCat;
+        const count =
+          c.subItems && c.subItems.length > 0 ? c.subItems.length : 8;
+        return {
+          ...c,
+          categoryType: catType,
+          subItems:
+            catType === 'non-exam'
+              ? buildInitialSubItems(c.id, c.name, count, c.subItems)
+              : c.subItems,
+        };
+      });
     }
 
     return (normalizedData.components || []).map((c, idx) => {
       const catType = inferCategoryType(c.name, c.categoryType);
       const compId = `comp-${Date.now()}-${idx}`;
       const subCount =
-        c.totalSubItemsCount && c.totalSubItemsCount > 1
+        c.totalSubItemsCount && c.totalSubItemsCount >= 1
           ? c.totalSubItemsCount
           : 8;
       const subDrop =
@@ -191,26 +218,30 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
         if (field === 'name') {
           const nextName = String(value);
           const nextCat = inferCategoryType(nextName);
+          const currentCount =
+            c.subItems && c.subItems.length > 0 ? c.subItems.length : 8;
           return {
             ...c,
             name: nextName,
             categoryType: nextCat,
             canBeDropped: nextCat === 'exam' ? c.canBeDropped ?? true : false,
             subItems:
-              nextCat === 'non-exam' && (!c.subItems || c.subItems.length === 0)
-                ? buildInitialSubItems(c.id, nextName, 8)
+              nextCat === 'non-exam'
+                ? buildInitialSubItems(c.id, nextName, currentCount, c.subItems)
                 : c.subItems,
           };
         }
         if (field === 'categoryType') {
           const nextCat = value === 'non-exam' ? 'non-exam' : 'exam';
+          const currentCount =
+            c.subItems && c.subItems.length > 0 ? c.subItems.length : 8;
           return {
             ...c,
             categoryType: nextCat,
             canBeDropped: nextCat === 'exam' ? true : false,
             subItems:
-              nextCat === 'non-exam' && (!c.subItems || c.subItems.length === 0)
-                ? buildInitialSubItems(c.id, c.name, 8)
+              nextCat === 'non-exam'
+                ? buildInitialSubItems(c.id, c.name, currentCount, c.subItems)
                 : c.subItems,
           };
         }
@@ -222,22 +253,56 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
     );
   };
 
+  const handleSubCountChange = (id: string, rawCount: number) => {
+    const clamped = Math.max(1, Math.min(40, Math.round(rawCount) || 1));
+    setComponents((prev) =>
+      prev.map((c) => {
+        if (c.id !== id) return c;
+        return {
+          ...c,
+          categoryType: 'non-exam',
+          subItems: buildInitialSubItems(c.id, c.name, clamped, c.subItems),
+          subDropLowestCount: Math.min(c.subDropLowestCount ?? 0, Math.max(0, clamped - 1)),
+        };
+      })
+    );
+  };
+
+  const handleSubDropLowestChange = (id: string, rawDrop: number) => {
+    setComponents((prev) =>
+      prev.map((c) => {
+        if (c.id !== id) return c;
+        const total = c.subItems?.length || 8;
+        const clamped = Math.max(0, Math.min(total - 1, Math.round(rawDrop) || 0));
+        return {
+          ...c,
+          subDropLowestCount: clamped,
+        };
+      })
+    );
+  };
+
   const handleAddComponent = () => {
     setValidationError(null);
     const rem = Math.max(0, Number((100 - effectiveTotalWeight).toFixed(1)));
+    const newId = `comp-${Date.now()}-${components.length}`;
+    const defaultName = `Quizzes`;
     setComponents((prev) => [
       ...prev,
       {
-        id: `comp-${Date.now()}-${prev.length}`,
-        name: `Exam ${prev.length + 1}`,
-        weight: rem > 0 ? rem : 20,
-        categoryType: 'exam',
-        canBeDropped: true,
+        id: newId,
+        name: defaultName,
+        weight: rem > 0 ? rem : 15,
+        categoryType: 'non-exam',
+        canBeDropped: false,
         status: 'remaining',
         earnedPoints: null,
         maxPoints: 100,
         assumedPercentage: 100,
         whatIfPercentage: null,
+        subTargetPercentage: 95,
+        subDropLowestCount: 0,
+        subItems: buildInitialSubItems(newId, defaultName, 8),
       },
     ]);
   };
@@ -427,95 +492,156 @@ export const ReviewCourseView: React.FC<ReviewCourseViewProps> = ({
             </select>
           </div>
 
-          <div className="space-y-2.5">
+          <div className="space-y-3">
             {components.map((comp) => {
               const isExam = comp.categoryType === 'exam';
+              const subCount = comp.subItems?.length || 8;
+              const subDrop = comp.subDropLowestCount ?? 0;
+
               return (
-                <div key={comp.id} className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={comp.name}
-                    onChange={(e) =>
-                      handleComponentChange(comp.id, 'name', e.target.value)
-                    }
-                    placeholder="Component"
-                    className="flex-1 px-3 py-2 text-sm bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:bg-white focus:outline-none focus:border-indigo-600"
-                  />
-
-                  <div className="relative w-24 shrink-0">
+                <div
+                  key={comp.id}
+                  className="p-3 bg-slate-50/70 border border-slate-200 rounded-xl space-y-2"
+                >
+                  <div className="flex flex-wrap items-center gap-2">
                     <input
-                      type="number"
-                      step="any"
-                      min="0"
-                      max="100"
-                      value={comp.weight}
+                      type="text"
+                      value={comp.name}
                       onChange={(e) =>
-                        handleComponentChange(comp.id, 'weight', e.target.value)
+                        handleComponentChange(comp.id, 'name', e.target.value)
                       }
-                      className="w-full pr-7 pl-3 py-2 text-sm font-mono tabular-nums text-right bg-slate-50 border border-slate-200 rounded-lg text-slate-900 focus:bg-white focus:outline-none focus:border-indigo-600"
+                      placeholder="Component (e.g. Quizzes, Homework, Midterm 1)"
+                      className="flex-1 min-w-[160px] px-3 py-1.5 text-sm bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-indigo-600"
                     />
-                    <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 font-mono">
-                      %
-                    </span>
-                  </div>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleComponentChange(
-                        comp.id,
-                        'categoryType',
-                        isExam ? 'non-exam' : 'exam'
-                      )
-                    }
-                    title="Click to toggle between Exam/Major Assessment (calculate required score) and Homework/Coursework (assume 100% / track per item)"
-                    className={`px-2.5 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      isExam
-                        ? 'bg-indigo-50/70 border-indigo-200 text-indigo-700'
-                        : 'bg-emerald-50/70 border-emerald-200 text-emerald-700'
-                    }`}
-                  >
-                    {isExam ? 'Exam · 考试' : 'HW · 平时'}
-                  </button>
+                    <div className="relative w-24 shrink-0">
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        max="100"
+                        value={comp.weight}
+                        onChange={(e) =>
+                          handleComponentChange(comp.id, 'weight', e.target.value)
+                        }
+                        className="w-full pr-7 pl-3 py-1.5 text-sm font-mono tabular-nums text-right bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-indigo-600"
+                      />
+                      <span className="absolute right-2.5 top-1/2 -translate-y-1/2 text-xs text-slate-400 font-mono">
+                        %
+                      </span>
+                    </div>
 
-                  {examDropCount > 0 && isExam && (
                     <button
                       type="button"
                       onClick={() =>
                         handleComponentChange(
                           comp.id,
-                          'canBeDropped',
-                          !(comp.canBeDropped !== false)
+                          'categoryType',
+                          isExam ? 'non-exam' : 'exam'
                         )
                       }
-                      title="Toggle whether this exam can be dropped if it is your lowest score"
-                      className={`px-2.5 py-2 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                        comp.canBeDropped !== false
-                          ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
-                          : 'bg-slate-100 border-slate-200 text-slate-500'
+                      title="Click to switch between Single Exam (Midterm/Final) and Multi-Item Coursework with Occurrence Count (Quizzes/Homework/Labs)"
+                      className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                        isExam
+                          ? 'bg-indigo-50/80 border-indigo-200 text-indigo-700'
+                          : 'bg-emerald-50/80 border-emerald-200 text-emerald-700'
                       }`}
                     >
-                      {comp.canBeDropped !== false ? 'Droppable · 可Drop' : 'Required · 必考'}
+                      {isExam ? 'Exam · 单次考试' : 'Multi-Item · 按次算分'}
                     </button>
+
+                    {examDropCount > 0 && isExam && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleComponentChange(
+                            comp.id,
+                            'canBeDropped',
+                            !(comp.canBeDropped !== false)
+                          )
+                        }
+                        title="Toggle whether this exam can be dropped if it is your lowest score"
+                        className={`px-2.5 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          comp.canBeDropped !== false
+                            ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                            : 'bg-slate-100 border-slate-200 text-slate-500'
+                        }`}
+                      >
+                        {comp.canBeDropped !== false
+                          ? 'Droppable · 可Drop'
+                          : 'Required · 必考'}
+                      </button>
+                    )}
+
+                    <button
+                      type="button"
+                      onClick={() => handleQuickSplit(comp)}
+                      title="Split into individual items"
+                      className="p-1.5 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors cursor-pointer"
+                    >
+                      <Split className="w-4 h-4" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveComponent(comp.id)}
+                      title="Remove"
+                      className="p-1.5 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  {/* Direct Occurrence Count (总次数) & Drop Lowest Controls for Quizzes, Homework, Labs, etc. */}
+                  {!isExam && (
+                    <div className="flex flex-wrap items-center gap-4 pt-1 pl-1 text-xs text-slate-600">
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium text-slate-600">
+                          Total Count / 总次数:
+                        </span>
+                        <input
+                          type="number"
+                          min={1}
+                          max={40}
+                          value={subCount}
+                          onChange={(e) =>
+                            handleSubCountChange(
+                              comp.id,
+                              parseInt(e.target.value, 10) || 1
+                            )
+                          }
+                          className="w-16 px-2 py-1 text-xs font-mono font-bold text-center bg-white border border-slate-200 rounded-md text-slate-900 focus:outline-none focus:border-indigo-600"
+                        />
+                        <span className="text-slate-400">次</span>
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-medium text-slate-600">
+                          Drop Lowest / 去最低:
+                        </span>
+                        <select
+                          value={subDrop}
+                          onChange={(e) =>
+                            handleSubDropLowestChange(
+                              comp.id,
+                              parseInt(e.target.value, 10) || 0
+                            )
+                          }
+                          className="px-2 py-1 text-xs font-mono font-semibold bg-white border border-slate-200 rounded-md text-slate-800 focus:outline-none focus:border-indigo-600 cursor-pointer"
+                        >
+                          <option value={0}>0 (All {subCount} count · 全部计入)</option>
+                          {Array.from(
+                            { length: Math.min(6, Math.max(0, subCount - 1)) },
+                            (_, idx) => idx + 1
+                          ).map((d) => (
+                            <option key={d} value={d}>
+                              Drop {d} (Best {subCount - d}/{subCount} · 去最低{d}次)
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </div>
                   )}
-
-                  <button
-                    type="button"
-                    onClick={() => handleQuickSplit(comp)}
-                    title="Split into individual items"
-                    className="p-2 text-slate-400 hover:text-indigo-600 rounded-lg hover:bg-indigo-50 transition-colors cursor-pointer"
-                  >
-                    <Split className="w-4 h-4" />
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleRemoveComponent(comp.id)}
-                    title="Remove"
-                    className="p-2 text-slate-400 hover:text-red-600 rounded-lg hover:bg-red-50 transition-colors cursor-pointer"
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
                 </div>
               );
             })}

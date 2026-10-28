@@ -2,7 +2,11 @@ import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import mammoth from 'mammoth';
 import { extractText } from 'unpdf';
 import { ParsedSyllabusResponse } from '../types/course';
-import { normalizeAndExpandParsedSyllabus } from './normalizeSyllabus';
+import {
+  detectSubItemCountAndDrop,
+  inferNormalizedCategory,
+  normalizeAndExpandParsedSyllabus,
+} from './normalizeSyllabus';
 
 declare const process: { env: { GEMINI_API_KEY?: string } };
 
@@ -11,10 +15,10 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
   "courseCode": "string (e.g. 'STAT 400', 'STAT 385', or '' if not visible; NEVER 'Unknown')",
   "courseTitle": "string",
   "examDropCount": 0,
-  "policyNotes": "string (brief summary of exam/homework drop policy if any)",
+  "policyNotes": "string (brief summary of exam/quiz/homework drop policy if any)",
   "components": [
     {
-      "name": "string (exact name e.g. 'Homework', 'Midterm 1', 'Midterm 2', 'Final Exam')",
+      "name": "string (exact name e.g. 'Homework', 'Quizzes', 'Midterm 1', 'Midterm 2', 'Final Exam')",
       "weight": 20,
       "categoryType": "exam | non-exam",
       "maxPoints": 100,
@@ -31,11 +35,11 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
 }
 Rules:
 1. NEVER duplicate components: if a syllabus lists grading components in a summary list/table and repeats them in detailed sections below, include each component ONLY ONCE so regular weights sum to 100%.
-2. Expand multi-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%).
+2. Expand multi-midterm/major-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%). Do NOT split Quizzes into separate rows — keep Quizzes as a single "non-exam" item with totalSubItemsCount and subDropLowestCount.
 3. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
 4. Category types:
-   - Regular ongoing coursework like Homework, Classwork, Practice Problems, Challenge Problems, Labs, Attendance, Participation, Worksheets, Discussions -> categoryType: "non-exam". If it says e.g. "(best 5/6)" or "8 homeworks, drop lowest 1", set totalSubItemsCount = 6 (or 8) and subDropLowestCount = 1.
-   - Major assessments like Midterm, Final Exam, Exams, Quizzes, Midterm Report, Final Project -> categoryType: "exam".
+   - Quizzes, Homework, Classwork, Practice Problems, Challenge Problems, Labs, Projects, Attendance, Participation, Worksheets, Discussions, Reports, and all other multi-occurrence coursework -> categoryType: "non-exam". If the syllabus states how many there are or drops lowest (e.g. "10 quizzes, drop lowest 2", "(best 5/6)", "8 homeworks, drop 1"), set totalSubItemsCount = 10 (or 6, 8, etc.) and subDropLowestCount = 2 (or 1).
+   - ONLY explicit major exams (Midterm, Midterm 1/2/3, Final Exam, Exam 1/2/3) -> categoryType: "exam".
 5. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
 
 /**
@@ -102,36 +106,7 @@ function normalizeComponentBaseKey(name: string): string {
 }
 
 export function inferComponentCategory(name: string): 'exam' | 'non-exam' {
-  const lower = name.toLowerCase();
-  if (
-    lower.includes('midterm') ||
-    lower.includes('final') ||
-    lower.includes('exam') ||
-    lower.includes('quiz') ||
-    lower.includes('test') ||
-    lower.includes('report')
-  ) {
-    return 'exam';
-  }
-  if (
-    lower.includes('homework') ||
-    lower.includes('hw') ||
-    lower.includes('classwork') ||
-    lower.includes('practice') ||
-    lower.includes('challenge') ||
-    lower.includes('problem') ||
-    lower.includes('worksheet') ||
-    lower.includes('attendance') ||
-    lower.includes('participation') ||
-    lower.includes('assignment') ||
-    lower.includes('lab') ||
-    lower.includes('discussion') ||
-    lower.includes('project') ||
-    lower.includes('mp')
-  ) {
-    return 'non-exam';
-  }
-  return 'exam';
+  return inferNormalizedCategory(name);
 }
 
 /**
@@ -165,10 +140,10 @@ export function smartParseSyllabusText(
     );
 
   const hasHwDrop =
-    /drop\s+(the\s+)?lowest\s+(1\s+|one\s+|two\s+|2\s+)?(homework|hw|assignment)/i.test(
+    /drop\s+(the\s+)?lowest\s+(1\s+|one\s+|two\s+|2\s+)?(homework|hw|assignment|quiz)/i.test(
       lowerFull
     ) ||
-    /lowest\s+(homework|hw|assignment)\s+(score\s+)?(is\s+|will\s+be\s+)?dropped/i.test(
+    /lowest\s+(homework|hw|assignment|quiz|quizzes)\s+(score\s+)?(is\s+|are\s+|will\s+be\s+)?dropped/i.test(
       lowerFull
     );
 
@@ -234,23 +209,19 @@ export function smartParseSyllabusText(
         const catType = inferComponentCategory(rawName);
         const isNonExam = catType === 'non-exam';
 
-        // Parse "(best 5/6)" or "best K of N"
-        const bestMatch =
-          rawName.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i) ||
-          line.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i);
-        const subTotal = bestMatch ? parseInt(bestMatch[2], 10) : isNonExam ? 8 : 1;
-        const subDrop = bestMatch
-          ? Math.max(0, parseInt(bestMatch[2], 10) - parseInt(bestMatch[1], 10))
-          : isNonExam && hasHwDrop
-          ? 1
-          : 0;
+        const detectedSub = isNonExam
+          ? detectSubItemCountAndDrop(rawName, line, normalizedText)
+          : {};
+        const subTotal = detectedSub.count ?? (isNonExam ? 8 : 1);
+        const subDrop =
+          detectedSub.dropCount ?? (isNonExam && hasHwDrop ? 1 : 0);
 
         const lower = rawName.toLowerCase();
         const multiExamMatch =
           !isNonExam &&
-          (rawName.match(/^(\d+)\s+(midterm|exam|quiz|test)s?/i) ||
-            rawName.match(/(midterm|exam|quiz|test)s?\s*\((\d+)\)/i) ||
-            line.match(/(\d+)\s*(?:midterms|exams|quizzes).*?(\d+)\s*%\s*each/i));
+          (rawName.match(/^(\d+)\s+(midterm|exam|test)s?/i) ||
+            rawName.match(/(midterm|exam|test)s?\s*\((\d+)\)/i) ||
+            line.match(/(\d+)\s*(?:midterms|exams|tests).*?(\d+)\s*%\s*each/i));
 
         if (multiExamMatch) {
           const count = parseInt(
@@ -260,11 +231,7 @@ export function smartParseSyllabusText(
             10
           );
           if (count >= 2 && count <= 8) {
-            const baseLabel = lower.includes('quiz')
-              ? 'Quiz'
-              : lower.includes('midterm')
-              ? 'Midterm'
-              : 'Exam';
+            const baseLabel = lower.includes('midterm') ? 'Midterm' : 'Exam';
             const eachMatch = line.match(/(\d+(?:\.\d+)?)\s*%\s*each/i);
             const eachWeight = eachMatch
               ? parseFloat(eachMatch[1])
