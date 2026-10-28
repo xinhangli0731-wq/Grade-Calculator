@@ -2,6 +2,7 @@ import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 import mammoth from 'mammoth';
 import { extractText } from 'unpdf';
 import { ParsedSyllabusResponse } from '../types/course';
+import { normalizeAndExpandParsedSyllabus } from './normalizeSyllabus';
 
 declare const process: { env: { GEMINI_API_KEY?: string } };
 
@@ -421,13 +422,10 @@ export async function parseSyllabusOnClientFallback(params: {
         });
         const rawJson = response.text?.trim();
         if (rawJson) {
-          const parsed = JSON.parse(rawJson) as ParsedSyllabusResponse;
-          if (
-            !parsed.courseCode ||
-            /^(unknown|unknown course|n\/a|none|null|not specified|course|syllabus)$/i.test(
-              String(parsed.courseCode).trim()
-            )
-          ) {
+          const parsed = normalizeAndExpandParsedSyllabus(
+            JSON.parse(rawJson) as Record<string, unknown>
+          );
+          if (!parsed.courseCode) {
             parsed.courseCode = cleanCourseCodeFromFileName(fileName);
           }
           return parsed;
@@ -438,5 +436,7 @@ export async function parseSyllabusOnClientFallback(params: {
     }
   }
 
-  return smartParseSyllabusText(extractedText || '', fileName);
+  return normalizeAndExpandParsedSyllabus(
+    smartParseSyllabusText(extractedText || '', fileName)
+  );
 }

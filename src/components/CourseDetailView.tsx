@@ -665,8 +665,12 @@ export const CourseDetailView: React.FC<CourseDetailViewProps> = ({
                               }`}
                             >
                               <ListChecks className="w-3 h-3" />
-                              {subMetrics && subMetrics.completedCount > 0
-                                ? `Track Each / 按次算分 (${subMetrics.completedCount}/${subMetrics.totalCount})`
+                              {subMetrics
+                                ? `Track Each / 按次算分 (${subMetrics.completedCount}/${subMetrics.totalCount}${
+                                    subMetrics.dropLowestCount > 0
+                                      ? ` · Drop ${subMetrics.dropLowestCount}`
+                                      : ''
+                                  })`
                                 : 'Track Each / 按次算分'}
                               {isSubExpanded ? (
                                 <ChevronUp className="w-3 h-3" />

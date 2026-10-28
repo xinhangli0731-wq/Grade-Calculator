@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import express from 'express';
+import http from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
@@ -130,6 +131,392 @@ function heuristicParseSyllabusText(text: string, fileName?: string) {
     examDropCount: hasExamDrop ? 1 : 0,
     gradeScaleFound: gradeScale.length > 0,
     gradeScale: gradeScale.sort((a, b) => b.minPercentage - a.minPercentage),
+  };
+}
+
+const WORD_NUMBERS: Record<string, number> = {
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+};
+
+function parseNumericValue(raw: unknown, fallback = 0): number {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return raw;
+  }
+  if (typeof raw === 'string') {
+    const match = raw.match(/-?\d+(?:\.\d+)?/);
+    if (match) {
+      const val = parseFloat(match[0]);
+      if (Number.isFinite(val)) return val;
+    }
+  }
+  return fallback;
+}
+
+function inferNormalizedCategory(
+  name: string,
+  rawCategory?: string
+): 'exam' | 'non-exam' {
+  const lower = (name || '').toLowerCase();
+  if (
+    lower.includes('midterm') ||
+    lower.includes('final') ||
+    lower.includes('exam') ||
+    lower.includes('quiz') ||
+    lower.includes('test') ||
+    lower.includes('report')
+  ) {
+    return 'exam';
+  }
+  if (
+    lower.includes('homework') ||
+    lower.includes('hw') ||
+    lower.includes('classwork') ||
+    lower.includes('practice') ||
+    lower.includes('challenge') ||
+    lower.includes('problem') ||
+    lower.includes('worksheet') ||
+    lower.includes('attendance') ||
+    lower.includes('participation') ||
+    lower.includes('assignment') ||
+    lower.includes('lab') ||
+    lower.includes('discussion') ||
+    lower.includes('project') ||
+    lower.includes('mp')
+  ) {
+    return 'non-exam';
+  }
+  const catLower = (rawCategory || '').toLowerCase();
+  if (
+    catLower === 'non-exam' ||
+    catLower.includes('homework') ||
+    catLower.includes('assignment') ||
+    catLower.includes('coursework') ||
+    catLower.includes('lab')
+  ) {
+    return 'non-exam';
+  }
+  return 'exam';
+}
+
+function detectMultiExamCountFromName(name: string): {
+  count: number;
+  dropCount: number;
+} | null {
+  const lower = name.toLowerCase().trim();
+  if (
+    /\b(midterm|exam|quiz|test)\s+#?\d+\b/i.test(lower) &&
+    !/[&,/-]|and|to|through/i.test(lower)
+  ) {
+    return null;
+  }
+  if (/\bfinal\b/i.test(lower)) {
+    return null;
+  }
+
+  const bestMatch = lower.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i);
+  if (bestMatch) {
+    const k = parseInt(bestMatch[1], 10);
+    const n = parseInt(bestMatch[2], 10);
+    if (n >= 2 && n <= 10 && k >= 1 && k < n) {
+      return { count: n, dropCount: n - k };
+    }
+  }
+
+  const rangeMatch = lower.match(
+    /\b(?:midterm|exam|quiz|test)s?\s*1\s*(?:-|–|to|through)\s*(\d+)\b/i
+  );
+  if (rangeMatch) {
+    const n = parseInt(rangeMatch[1], 10);
+    if (n >= 2 && n <= 10) return { count: n, dropCount: 0 };
+  }
+
+  if (/\b(?:midterm|exam|quiz|test)s?\s*1\s*(?:,|&|and)\s*2\s*(?:,|&|and)\s*3\b/i.test(lower)) {
+    return { count: 3, dropCount: 0 };
+  }
+  if (/\b(?:midterm|exam|quiz|test)s?\s*1\s*(?:&|and)\s*2\b/i.test(lower)) {
+    return { count: 2, dropCount: 0 };
+  }
+
+  const numPrefix = lower.match(
+    /^(\d+)\s+(?:in-class\s+|hourly\s+|evening\s+)?(?:midterm|exam|quiz|test)/i
+  );
+  if (numPrefix) {
+    const n = parseInt(numPrefix[1], 10);
+    if (n >= 2 && n <= 10) return { count: n, dropCount: 0 };
+  }
+
+  const wordPrefix = lower.match(
+    /^(two|three|four|five|six)\s+(?:in-class\s+|hourly\s+|evening\s+)?(?:midterm|exam|quiz|test)/i
+  );
+  if (wordPrefix) {
+    const n = WORD_NUMBERS[wordPrefix[1].toLowerCase()];
+    if (n) return { count: n, dropCount: 0 };
+  }
+
+  const parenCount = lower.match(
+    /(?:midterm|exam|quiz|test)s?.*?\(\s*x?(\d+)\s*(?:@|×|x|exams|midterms|quizzes|total|each)?/i
+  );
+  if (parenCount) {
+    const n = parseInt(parenCount[1], 10);
+    if (n >= 2 && n <= 10) return { count: n, dropCount: 0 };
+  }
+
+  return null;
+}
+
+function getSingularExamLabel(name: string): string {
+  const lower = name.toLowerCase();
+  if (lower.includes('midterm')) return 'Midterm';
+  if (lower.includes('quiz')) return 'Quiz';
+  if (lower.includes('test')) return 'Test';
+  return 'Exam';
+}
+
+function normalizeAndExpandParsedSyllabus(raw: Record<string, unknown>) {
+  const rawCode = typeof raw.courseCode === 'string' ? raw.courseCode.trim() : '';
+  const courseCode = /^(unknown|unknown course|n\/a|none|null|not specified|course|syllabus)$/i.test(
+    rawCode
+  )
+    ? ''
+    : rawCode;
+
+  const rawTitle = typeof raw.courseTitle === 'string' ? raw.courseTitle.trim() : '';
+  const courseTitle = /^(unknown|unknown course|n\/a|none|null|not specified)$/i.test(
+    rawTitle
+  )
+    ? ''
+    : rawTitle;
+
+  let examDropCount = Math.max(0, Math.round(parseNumericValue(raw.examDropCount, 0)));
+  const policyNotes =
+    typeof raw.policyNotes === 'string' ? raw.policyNotes.trim() : undefined;
+
+  const rawComponents = Array.isArray(raw.components) ? raw.components : [];
+  const seenKeys = new Set<string>();
+  const normalizedList: Array<{
+    name: string;
+    weight: number;
+    categoryType: 'exam' | 'non-exam';
+    maxPoints: number;
+    canBeDropped?: boolean;
+    isExtraCredit?: boolean;
+    totalSubItemsCount: number;
+    subDropLowestCount: number;
+    notes?: string;
+  }> = [];
+
+  for (const item of rawComponents) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const name = typeof rec.name === 'string' ? rec.name.trim() : '';
+    if (!name) continue;
+
+    const dedupeKey = name
+      .toLowerCase()
+      .replace(/\(.*?\)/g, '')
+      .replace(/[^a-z0-9]+/g, ' ')
+      .trim();
+    if (!dedupeKey || seenKeys.has(dedupeKey)) continue;
+
+    const weight = parseNumericValue(rec.weight, 0);
+    if (weight <= 0) continue;
+
+    const categoryType = inferNormalizedCategory(
+      name,
+      typeof rec.categoryType === 'string' ? rec.categoryType : undefined
+    );
+    const maxPoints = Math.max(1, parseNumericValue(rec.maxPoints, 100));
+
+    let totalSubItemsCount = Math.max(
+      1,
+      Math.round(
+        parseNumericValue(rec.totalSubItemsCount, categoryType === 'non-exam' ? 8 : 1)
+      )
+    );
+    let subDropLowestCount = Math.max(
+      0,
+      Math.round(parseNumericValue(rec.subDropLowestCount, 0))
+    );
+
+    const bestInName = name.match(/best\s+(\d+)\s*(?:\/|of|out of)\s*(\d+)/i);
+    if (bestInName) {
+      const k = parseInt(bestInName[1], 10);
+      const n = parseInt(bestInName[2], 10);
+      if (n >= 2 && k >= 1 && k < n) {
+        totalSubItemsCount = n;
+        subDropLowestCount = n - k;
+      }
+    }
+
+    seenKeys.add(dedupeKey);
+    normalizedList.push({
+      name,
+      weight,
+      categoryType,
+      maxPoints,
+      canBeDropped:
+        typeof rec.canBeDropped === 'boolean' ? rec.canBeDropped : undefined,
+      isExtraCredit: Boolean(rec.isExtraCredit),
+      totalSubItemsCount,
+      subDropLowestCount,
+      notes: typeof rec.notes === 'string' ? rec.notes : undefined,
+    });
+  }
+
+  const expandedComponents: Array<Record<string, unknown>> = [];
+  let groupSpecificDropTriggered = false;
+
+  for (let i = 0; i < normalizedList.length; i++) {
+    const comp = normalizedList[i];
+    if (comp.categoryType === 'exam') {
+      const fromName = detectMultiExamCountFromName(comp.name);
+      const fromNotes = comp.notes ? detectMultiExamCountFromName(comp.notes) : null;
+      const isSingleNumbered =
+        /\b(midterm|exam|quiz|test)\s+#?\d+\b/i.test(comp.name) &&
+        !/[&,/-]|and|to|through/i.test(comp.name);
+      const isFinal = /\bfinal\b/i.test(comp.name);
+
+      const countFromField =
+        !isSingleNumbered &&
+        !isFinal &&
+        comp.totalSubItemsCount >= 2 &&
+        comp.totalSubItemsCount <= 10
+          ? comp.totalSubItemsCount
+          : 1;
+
+      let examCount = fromName
+        ? fromName.count
+        : fromNotes
+        ? fromNotes.count
+        : countFromField;
+
+      if (
+        examCount === 1 &&
+        !isSingleNumbered &&
+        !isFinal &&
+        /\b(midterms|exams|tests)\b/i.test(comp.name) &&
+        policyNotes
+      ) {
+        const fromPolicy = detectMultiExamCountFromName(policyNotes);
+        if (fromPolicy) {
+          examCount = fromPolicy.count;
+        }
+      }
+
+      const groupDrop =
+        comp.subDropLowestCount > 0
+          ? comp.subDropLowestCount
+          : fromName?.dropCount || fromNotes?.dropCount || 0;
+
+      if (examCount >= 2 && examCount <= 10) {
+        if (groupDrop > 0 && examDropCount === 0) {
+          examDropCount = groupDrop;
+          groupSpecificDropTriggered = true;
+        }
+
+        const countedInGroup =
+          groupDrop > 0 && groupDrop < examCount
+            ? examCount - groupDrop
+            : examCount;
+
+        const otherWeightSum = normalizedList
+          .filter((_, idx) => idx !== i)
+          .reduce((s, c) => s + c.weight, 0);
+
+        const diffIfGroupTotal = Math.abs(otherWeightSum + comp.weight - 100);
+        const diffIfPerExam = Math.abs(
+          otherWeightSum + comp.weight * countedInGroup - 100
+        );
+
+        const eachWeight =
+          diffIfPerExam + 1 < diffIfGroupTotal
+            ? comp.weight
+            : Number((comp.weight / countedInGroup).toFixed(2));
+
+        const baseLabel = getSingularExamLabel(comp.name);
+        for (let idx = 1; idx <= examCount; idx++) {
+          expandedComponents.push({
+            name: `${baseLabel} ${idx}`,
+            weight:
+              idx === examCount &&
+              diffIfGroupTotal <= diffIfPerExam + 1 &&
+              groupDrop === 0
+                ? Number((comp.weight - eachWeight * (examCount - 1)).toFixed(2))
+                : eachWeight,
+            categoryType: 'exam',
+            maxPoints: comp.maxPoints,
+            canBeDropped:
+              groupDrop > 0 ? true : comp.canBeDropped ?? examDropCount > 0,
+            isExtraCredit: false,
+            totalSubItemsCount: 1,
+            subDropLowestCount: 0,
+          });
+        }
+        continue;
+      }
+    }
+
+    expandedComponents.push({
+      name: comp.name,
+      weight: comp.weight,
+      categoryType: comp.categoryType,
+      maxPoints: comp.maxPoints,
+      canBeDropped:
+        comp.categoryType === 'exam'
+          ? groupSpecificDropTriggered && /\bfinal\b/i.test(comp.name)
+            ? false
+            : comp.canBeDropped ?? true
+          : false,
+      isExtraCredit: comp.isExtraCredit,
+      totalSubItemsCount: comp.totalSubItemsCount,
+      subDropLowestCount: comp.subDropLowestCount,
+      notes: comp.notes,
+    });
+  }
+
+  const rawScale = Array.isArray(raw.gradeScale) ? raw.gradeScale : [];
+  const gradeScale: Array<{ letter: string; minPercentage: number }> = [];
+  const seenLetters = new Set<string>();
+
+  for (const g of rawScale) {
+    if (!g || typeof g !== 'object') continue;
+    const rec = g as Record<string, unknown>;
+    const letter =
+      typeof rec.letter === 'string' ? rec.letter.trim().toUpperCase() : '';
+    const minPct = parseNumericValue(rec.minPercentage, NaN);
+    if (
+      letter &&
+      Number.isFinite(minPct) &&
+      minPct > 0 &&
+      minPct <= 105 &&
+      !seenLetters.has(letter)
+    ) {
+      seenLetters.add(letter);
+      gradeScale.push({
+        letter,
+        minPercentage: minPct,
+      });
+    }
+  }
+
+  gradeScale.sort((a, b) => b.minPercentage - a.minPercentage);
+
+  return {
+    courseCode,
+    courseTitle,
+    examDropCount,
+    policyNotes,
+    components: expandedComponents,
+    gradeScaleFound: gradeScale.length > 0,
+    gradeScale,
   };
 }
 
@@ -283,7 +670,6 @@ async function startServer() {
         return;
       }
 
-      // Ultra-fast call (~1.1s): gemini-3.1-flash-lite with ThinkingLevel.MINIMAL and responseMimeType: 'application/json'
       let parsed: Record<string, unknown> | null = null;
       let lastError: unknown = null;
 
@@ -323,29 +709,14 @@ async function startServer() {
       }
 
       if (parsed) {
-        if (
-          !parsed.courseCode ||
-          /^(unknown|unknown course|n\/a|none|null|not specified|course|syllabus)$/i.test(
-            String(parsed.courseCode).trim()
-          )
-        ) {
-          parsed.courseCode = '';
-        }
-        if (
-          !parsed.courseTitle ||
-          /^(unknown|unknown course|n\/a|none|null|not specified)$/i.test(
-            String(parsed.courseTitle).trim()
-          )
-        ) {
-          parsed.courseTitle = '';
-        }
-        res.json(parsed);
+        const normalized = normalizeAndExpandParsedSyllabus(parsed);
+        res.json(normalized);
         return;
       }
 
       if (combinedExtractedText.trim().length > 0) {
         const fallbackResult = heuristicParseSyllabusText(combinedExtractedText, fileName);
-        res.json(fallbackResult);
+        res.json(normalizeAndExpandParsedSyllabus(fallbackResult));
         return;
       }
 
@@ -362,7 +733,11 @@ async function startServer() {
     }
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  const isProd =
+    process.env.NODE_ENV === 'production' ||
+    process.env.npm_lifecycle_event === 'start';
+
+  if (!isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -376,9 +751,26 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  // Always bind port 3000 for nginx proxy in AI Studio
+  const primaryServer = http.createServer(app);
+  primaryServer.on('error', (err: NodeJS.ErrnoException) => {
+    console.warn(`Port ${PORT} warning:`, err.message);
+  });
+  primaryServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Course Grade Planner server running on http://localhost:${PORT}`);
   });
+
+  // In standalone Cloud Run deployments where PORT (e.g. 8080) is not occupied by nginx, bind it too
+  const envPort = Number(process.env.PORT);
+  if (envPort && envPort !== PORT) {
+    const cloudRunServer = http.createServer(app);
+    cloudRunServer.on('error', () => {
+      // Ignore EADDRINUSE when nginx is already listening on 8080 in the AI Studio sandbox
+    });
+    cloudRunServer.listen(envPort, '0.0.0.0', () => {
+      console.log(`Course Grade Planner Cloud Run listener active on port ${envPort}`);
+    });
+  }
 }
 
 startServer();
