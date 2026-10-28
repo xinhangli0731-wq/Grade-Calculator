@@ -54,6 +54,7 @@ function heuristicParseSyllabusText(text: string, fileName?: string) {
     categoryType: 'exam' | 'non-exam';
     maxPoints: number;
     canBeDropped?: boolean;
+    isExtraCredit?: boolean;
   }> = [];
   const gradeScale: Array<{ letter: string; minPercentage: number }> = [];
 
@@ -82,13 +83,18 @@ function heuristicParseSyllabusText(text: string, fileName?: string) {
     }
     if (matchedCutoffOnLine) continue;
 
-    const compMatch = line.match(/^[-*•]?\s*([A-Za-z0-9\s&/()#-]{2,40}?)\s*[:=\-–—(]\s*(\d{1,3}(?:\.\d+)?)\s*%/);
+    const compMatch = line.match(/^[-*•]?\s*([A-Za-z0-9\s&/()+#-]{2,45}?)\s*[:=\-–—(]\s*\+?(\d{1,3}(?:\.\d+)?)\s*%/);
     if (compMatch) {
       const rawName = compMatch[1].trim();
       const weight = parseFloat(compMatch[2]);
       if (weight > 0 && weight <= 100 && !gradeLetters.has(rawName.toUpperCase())) {
         const lower = rawName.toLowerCase();
+        const isExtraCredit =
+          lower.includes('extra credit') ||
+          lower.includes('bonus') ||
+          line.toLowerCase().includes('extra credit');
         const isNonExam =
+          isExtraCredit ||
           lower.includes('homework') ||
           lower.includes('hw') ||
           lower.includes('attendance') ||
@@ -101,7 +107,8 @@ function heuristicParseSyllabusText(text: string, fileName?: string) {
           weight,
           categoryType: isNonExam ? 'non-exam' : 'exam',
           maxPoints: 100,
-          canBeDropped: !isNonExam && hasExamDrop,
+          canBeDropped: !isNonExam && !isExtraCredit && hasExamDrop,
+          isExtraCredit,
         });
       }
     }
@@ -131,14 +138,15 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
   "courseCode": "string (e.g. 'STAT 400', or '' if not visible; NEVER 'Unknown')",
   "courseTitle": "string",
   "examDropCount": 0,
-  "policyNotes": "string (brief summary of exam/homework drop policy if any)",
+  "policyNotes": "string (brief summary of exam/homework drop policy and extra credit policy if any)",
   "components": [
     {
-      "name": "string (exact name e.g. 'Homework', 'Midterm 1', 'Midterm 2', 'Midterm 3', 'Final Exam')",
+      "name": "string (exact name e.g. 'Homework', 'Midterm 1', 'Midterm 2', 'Midterm 3', 'Final Exam', 'Extra Credit')",
       "weight": 20,
       "categoryType": "exam | non-exam",
       "maxPoints": 100,
       "canBeDropped": true,
+      "isExtraCredit": false,
       "totalSubItemsCount": 8,
       "subDropLowestCount": 0
     }
@@ -152,8 +160,9 @@ const SYSTEM_PROMPT = `Parse the syllabus and return ONLY a JSON object with thi
 Rules:
 1. Expand multi-exam categories into individual items (e.g. "3 Midterms 60%" -> Midterm 1 20%, Midterm 2 20%, Midterm 3 20%).
 2. If syllabus drops lowest exam(s) or takes best K of N exams (e.g. "4 exams, lowest 1 dropped / best 3 count", or "best 2 of 3 midterms", or "final replaces lowest midterm"), set examDropCount = 1 (or number dropped), set canBeDropped = true on exams in that drop pool, and set each exam's weight to its weight WHEN COUNTED.
-3. Homework/Labs/Participation -> categoryType: "non-exam". Exams/Midterms/Finals/Quizzes -> categoryType: "exam".
-4. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
+3. Extra Credit / Bonus: If syllabus mentions any Extra Credit or Bonus (e.g. "Extra Credit: up to 2%", "Course Evaluation Bonus: 1%", "Bonus Quizzes: 3%"), include it in components with "isExtraCredit": true, "categoryType": "non-exam", "canBeDropped": false, and "weight" equal to its maximum bonus percentage. Regular components must have "isExtraCredit": false.
+4. Homework/Labs/Participation -> categoryType: "non-exam". Exams/Midterms/Finals/Quizzes -> categoryType: "exam".
+5. If letter grade cutoffs are NOT explicitly in the syllabus, set gradeScaleFound = false and gradeScale = [].`;
 
 async function startServer() {
   const app = express();

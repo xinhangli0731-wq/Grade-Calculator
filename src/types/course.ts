@@ -26,6 +26,10 @@ export interface GradeComponent {
    */
   canBeDropped?: boolean;
   /**
+   * Whether this component is Extra Credit / Bonus (adds pure bonus % to overall course grade without increasing the 100% base denominator)
+   */
+  isExtraCredit?: boolean;
+  /**
    * Individual homework/assignment tracker (for non-exam components like Homework)
    */
   subItems?: SubAssignmentItem[];
@@ -50,6 +54,10 @@ export interface Course {
    * Number of lowest exams dropped from the droppable exam pool (0 = none, 1 = drop lowest 1 exam, etc.)
    */
   examDropCount?: number;
+  /**
+   * Additional overall extra credit bonus percentage points (e.g. 1.5 for +1.5% bonus to total course grade)
+   */
+  extraCreditBonus?: number;
   policyNotes?: string;
   assumeNonExamFullCreditInProgress: boolean;
   createdAt: string;
@@ -64,6 +72,7 @@ export interface ParsedSyllabusResponse {
     categoryType: 'exam' | 'non-exam';
     maxPoints: number;
     canBeDropped?: boolean;
+    isExtraCredit?: boolean;
     totalSubItemsCount?: number;
     subDropLowestCount?: number;
     notes?: string;

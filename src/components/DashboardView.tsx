@@ -73,18 +73,20 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 
       {/* Course Cards Grid */}
       {courses.length === 0 ? (
-        <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
-          <h2 className="text-base font-semibold text-slate-900">No courses yet</h2>
-          <p className="text-sm text-slate-500 mt-1 mb-5">
-            Paste a screenshot or syllabus to create your first course.
+        <div className="bg-white border border-slate-200 border-t-4 border-t-indigo-600 rounded-xl p-14 text-center shadow-2xs">
+          <h2 className="text-lg font-bold text-slate-900 font-display">
+            No courses yet · 暂无课程
+          </h2>
+          <p className="text-sm text-slate-500 mt-1.5 mb-6 max-w-md mx-auto">
+            Upload a syllabus file, paste a screenshot (⌘V / Ctrl+V), or enter weights manually to create your first course.
           </p>
           <button
             type="button"
             onClick={onAddCourse}
-            className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors cursor-pointer"
+            className="inline-flex items-center gap-2 px-5 py-2.5 text-sm font-semibold text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors cursor-pointer shadow-xs"
           >
             <Plus className="w-4 h-4" />
-            Add Course
+            Add Course · 添加第一门课
           </button>
         </div>
       ) : (

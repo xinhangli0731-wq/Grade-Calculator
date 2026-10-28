@@ -1,6 +1,5 @@
 import { useState, useEffect } from 'react';
 import { Course, ParsedSyllabusResponse } from './types/course';
-import { INITIAL_COURSES } from './data/initialCourses';
 import { Navbar, ActiveNavTab } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
 import { AddCourseView } from './components/AddCourseView';
@@ -19,7 +18,7 @@ type AppScreen =
   | { type: 'course-detail'; courseId: string }
   | { type: 'how-it-works' };
 
-const STORAGE_KEY = 'course_grade_planner_courses_v2';
+const STORAGE_KEY = 'course_grade_planner_courses_v3';
 
 export default function App() {
   const [courses, setCourses] = useState<Course[]>(() => {
@@ -27,14 +26,14 @@ export default function App() {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
         const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length > 0) {
+        if (Array.isArray(parsed)) {
           return parsed;
         }
       }
     } catch {
       // Ignore storage errors
     }
-    return INITIAL_COURSES;
+    return [];
   });
 
   const [screen, setScreen] = useState<AppScreen>({ type: 'dashboard' });
